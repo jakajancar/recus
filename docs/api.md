@@ -716,7 +716,7 @@ Requires authentication. Body: `{ "data": { ... } }`.
 
 Courts are also referred to as "sites" in the API. The `courts[].id` from the location endpoint is the same as the `siteId` used here.
 
-### Get site detail 🔒
+### Get site detail
 
 ```
 GET /v1/sites/{siteId}
@@ -793,7 +793,7 @@ Returns available dates and time slots for a specific court/site.
 - Each time slot lists which durations (in minutes) are available starting at that time.
 - This endpoint is used by the frontend to populate the time and duration pickers.
 
-### Get site instant booking configuration 🔒
+### Get site instant booking configuration
 
 ```
 GET /v1/sites/{siteId}/instant-booking-configuration
