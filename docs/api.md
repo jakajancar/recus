@@ -15,7 +15,7 @@ Responses are JSON. Errors return:
 }
 ```
 
-Common error types: `E_UNAUTHORIZED`, `E_COURT_NOT_FOUND`, `E_SECTION_NOT_FOUND`.
+Common error types: `E_UNAUTHORIZED`, `E_COURT_NOT_FOUND`, `E_SECTION_NOT_FOUND`, `E_INELIGIBLE_SITE_BOOKING`, `E_INVALID_BODY`, `E_INVALID_REQUEST`, `E_FORBIDDEN`.
 
 ---
 
@@ -733,11 +733,22 @@ Returns detailed information about a specific court/site, including whether it s
     "courtNumber": "A",
     "capacity": 0,
     "isInstantBookable": true,
+    "noReservationText": null,
     "locationId": "38a201f0-4fb1-4991-8e72-db8a9495319e",
     "locationName": "Granada Park",
     "config": {
       "pricing": { "default": { "type": "perHour", "cents": 0 } },
-      "deposits": {}
+      "deposits": {},
+      "bookingPolicies": [
+        {
+          "type": "fixed-slots",
+          "isActive": true,
+          "slots": [
+            { "dayOfWeek": 1, "startTimeLocal": "07:30:00", "endTimeLocal": "09:00:00" },
+            { "dayOfWeek": 1, "startTimeLocal": "09:00:00", "endTimeLocal": "10:30:00" }
+          ]
+        }
+      ]
     },
     "allowedReservationDurations": { "minutes": [30, 60, 90, 120] },
     "maxReservationTime": "02:00:00",
@@ -751,6 +762,8 @@ Returns detailed information about a specific court/site, including whether it s
 **Notes:**
 - `capacity` — 0 means no cap on attendees.
 - `isInstantBookable` — if `true`, the court can be booked directly via the facility-rentals endpoint. If `false`, the court may require a request/approval flow.
+- `noReservationText` — if set (e.g. `"Not Reservable"`), the court is walk-up only.
+- `config.bookingPolicies[]` — optional. When present with `type: "fixed-slots"`, the court uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with `"The reservation violates the site's booking policy"`. `dayOfWeek` uses 1=Monday through 7=Sunday. If no `bookingPolicies` are present, the court uses flexible booking with `allowedReservationDurations`.
 
 ### Get site availability 🔒
 
@@ -858,7 +871,54 @@ GET    /v1/users/{userId}/payment-methods           → saved payment methods
 GET    /v1/users/{userId}/claimables/check          → check claimable items
 POST   /v1/users/signup/validate                   → validate signup data
 POST   /v1/users/send-verification                  → send verification code
+POST   /v1/users/{userId}/payment-method-setup      → get Stripe setup intent + saved cards (see below)
 ```
+
+#### Get saved payment methods (Stripe)
+
+```
+POST /v1/users/{userId}/payment-method-setup
+```
+
+Returns a Stripe SetupIntent and the user's saved payment methods for a given organization. This is how you discover saved card IDs (`pm_...`) needed for the card payment flow.
+
+**Request body:**
+
+```json
+{
+  "data": {
+    "organizationId": "17380e28-7e02-4b52-82c5-fab18557fd7a"
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "provider": "stripe",
+    "setupIntentId": "seti_1T5tqjCMyY4UUjhB8p5JyVDt",
+    "clientSecret": "seti_1T5tqjCMyY4UUjhB..._secret_...",
+    "paymentMethods": [
+      {
+        "id": "pm_1Sygm4CMyY4UUjhBOhNeoApv",
+        "card": {
+          "brand": "visa",
+          "exp_month": 1,
+          "exp_year": 2031,
+          "last4": "7510"
+        }
+      }
+    ]
+  }
+}
+```
+
+**Notes:**
+- `paymentMethods[].id` — the Stripe PaymentMethod ID (e.g. `pm_...`). Used when confirming a PaymentIntent via the Stripe API.
+- `setupIntentId` / `clientSecret` — a Stripe SetupIntent for adding new payment methods (not needed for paying with an existing saved card).
+- `organizationId` is required because payment methods are scoped per Stripe Connect account (each organization has its own).
 
 ### Court Reservations (Facility Rentals)
 
@@ -974,19 +1034,19 @@ POST /v1/orders/{orderId}/pay
 
 **Payment method types:**
 
-| Type | Use case |
-|---|---|
-| `free` | $0 reservations (`amountCents` must be `0`) |
-| `cardOnline` | Credit/debit card payment |
-| `organizationCredit` | Org credit balance |
-| `ACH` | Bank transfer |
-| `check` | Check (also requires `checkNumber` field) |
-| `cash` | Cash payment |
-| `cardPresent` | In-person card (also requires `providerReaderId` field) |
-| `giftCard` | Gift card (also requires `storedValueAccountCode` field) |
-| `scholarship` | Scholarship (also requires `storedValueAccountCode` field) |
+| Type | Use case | API-callable? |
+|---|---|---|
+| `free` | $0 reservations (`amountCents` must be `0`) | Yes |
+| `ACH` | Triggers Stripe PaymentIntent for card payment | Yes (see below) |
+| `cardOnline` | Used by the web frontend only | **No** — rejected with `E_INVALID_BODY` |
+| `organizationCredit` | Org credit balance | Untested |
+| `check` | Check (also requires `checkNumber` field) | Admin only |
+| `cash` | Cash payment | Admin only (`E_FORBIDDEN` for consumers) |
+| `cardPresent` | In-person card (also requires `providerReaderId` field) | Admin only |
+| `giftCard` | Gift card (also requires `storedValueAccountCode` field) | Untested |
+| `scholarship` | Scholarship (also requires `storedValueAccountCode` field) | Untested |
 
-**Response (200 OK):**
+**Response for `free` (200 OK — immediate settlement):**
 
 ```json
 {
@@ -999,6 +1059,93 @@ POST /v1/orders/{orderId}/pay
   }
 }
 ```
+
+#### Paying with a saved card (Stripe flow)
+
+The `cardOnline` payment type is rejected by the API with `E_INVALID_BODY` when called directly. To pay with a saved card via the API, use `paymentMethodType: "ACH"` instead — this creates a Stripe PaymentIntent that you then confirm with the Stripe API using a saved card.
+
+**Stripe publishable key:** `pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB`
+
+**Step 1: Submit payment with `ACH` type**
+
+```json
+{
+  "data": {
+    "payments": [
+      {
+        "paymentMethodType": "ACH",
+        "amountCents": 750
+      }
+    ]
+  }
+}
+```
+
+**Response (200 OK — pending, needs Stripe confirmation):**
+
+```json
+{
+  "data": {
+    "id": "transaction-event-uuid",
+    "type": "payment",
+    "status": "pending",
+    "orderId": "order-uuid",
+    "settledAt": null
+  },
+  "included": {
+    "payments": [
+      {
+        "id": "payment-uuid",
+        "orderId": "order-uuid",
+        "referenceId": "pi_3T5tvECMyY4UUjhB1Is9sEQ2",
+        "gateway": "stripe",
+        "gatewayData": {
+          "provider": "stripe",
+          "paymentIntentId": "pi_3T5tvECMyY4UUjhB1Is9sEQ2",
+          "clientSecret": "pi_3T5tvECMyY4UUjhB1Is9sEQ2_secret_...",
+          "paymentMethods": [
+            {
+              "id": "pm_1Sygm4CMyY4UUjhBOhNeoApv",
+              "card": { "brand": "visa", "exp_month": 1, "exp_year": 2031, "last4": "7510" }
+            }
+          ]
+        },
+        "amount": 750,
+        "currency": "USD",
+        "status": "pending",
+        "paymentMethodType": "ACH"
+      }
+    ]
+  }
+}
+```
+
+**Key fields in `gatewayData`:**
+- `paymentIntentId` — the Stripe PaymentIntent ID (`pi_...`)
+- `clientSecret` — the client secret needed to confirm the PaymentIntent
+- `paymentMethods[]` — the user's saved cards (same data as from `payment-method-setup`)
+
+**Step 2: Confirm the PaymentIntent via Stripe API**
+
+```bash
+curl -s -X POST "https://api.stripe.com/v1/payment_intents/${PAYMENT_INTENT_ID}/confirm" \
+  -u "${STRIPE_PUBLISHABLE_KEY}:" \
+  -d "payment_method=${PAYMENT_METHOD_ID}" \
+  -d "client_secret=${CLIENT_SECRET}"
+```
+
+**Response:**
+
+```json
+{
+  "id": "pi_3T5tvECMyY4UUjhB1Is9sEQ2",
+  "status": "succeeded",
+  "amount": 750,
+  "currency": "usd"
+}
+```
+
+Once Stripe confirms the payment, the rec.us order is automatically settled via webhook. The order's `totalAmountRemaining` drops to 0 and the payment status changes to `succeeded`.
 
 ### Organizations (admin)
 
@@ -1115,3 +1262,85 @@ curl -s "https://api.rec.us/v1/locations/$LOCATION_ID/schedule?startDate=2026-03
 - For free courts, use `paymentMethodType: "free"` with `amountCents: 0`.
 - The `timestampRange` uses PostgreSQL range syntax: `[start, end)` — inclusive start, exclusive end.
 - Times in `timestampRange` are in the location's local timezone (e.g. `America/Los_Angeles`).
+
+## Example: Book a Paid Court (Full Flow)
+
+Same as the free court flow above, but diverges at step 4 — the court has a `fixed-slots` booking policy, and payment requires a Stripe confirmation step.
+
+```bash
+# Steps 1-3 are the same as "Book a Free Court" (authenticate, find location, check schedule).
+
+# 4. Get site detail — check booking policy and pricing
+COURT_ID="040a5a1a-443a-4641-b079-ed7e650bd5ac"   # J.P. Murphy Court 3
+curl -s "https://api.rec.us/v1/sites/$COURT_ID" \
+  -H "Authorization: Bearer $TOKEN" | \
+  jq '.data | {id, courtNumber, isInstantBookable, noReservationText,
+    pricing: .config.pricing.default,
+    bookingPolicy: .config.bookingPolicies[0].type,
+    fixedSlots: [.config.bookingPolicies[0].slots[] | select(.dayOfWeek == 7) | {start: .startTimeLocal, end: .endTimeLocal}]}'
+# → bookingPolicy: "fixed-slots", fixedSlots: [{start: "16:30:00", end: "18:00:00"}, ...]
+# With fixed-slots, your timestampRange MUST match a slot exactly.
+
+# 5. Create the reservation (timestampRange matches the fixed slot 16:30-18:00)
+LOCATION_ID="7a8ef25a-dc20-4046-8aab-7212a9a41d20"
+RESULT=$(curl -s -X POST 'https://api.rec.us/v1/facility-rentals' \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"data\": {
+      \"reservation\": {
+        \"timestampRange\": \"[2026-03-01 16:30:00, 2026-03-01 18:00:00)\",
+        \"locationId\": \"$LOCATION_ID\",
+        \"courtIds\": [\"$COURT_ID\"]
+      }
+    }
+  }")
+ORDER_ID=$(echo "$RESULT" | jq -r '.data.order.id')
+ITEM_ID=$(echo "$RESULT" | jq -r '.data.order.items[0].id')
+TOTAL=$(echo "$RESULT" | jq -r '.data.order.total')
+echo "Order: $ORDER_ID, Item: $ITEM_ID, Total: $TOTAL cents"
+# → Total: 750 (= $7.50 for 1.5 hours at $5/hour)
+
+# 6. Look up saved payment methods
+USER_ID=$(echo "$RESULT" | jq -r '.data.order.customer.id')
+ORG_ID=$(echo "$RESULT" | jq -r '.data.order.organization.id')
+curl -s -X POST "https://api.rec.us/v1/users/$USER_ID/payment-method-setup" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"data\":{\"organizationId\":\"$ORG_ID\"}}" | \
+  jq '.data.paymentMethods[] | {id, brand: .card.brand, last4: .card.last4}'
+# → { "id": "pm_1Sygm4CMyY4UUjhBOhNeoApv", "brand": "visa", "last4": "7510" }
+
+# 7. Submit payment (use "ACH" type — "cardOnline" is rejected by the API)
+PAY_RESULT=$(curl -s -X POST "https://api.rec.us/v1/orders/$ORDER_ID/pay" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"data\":{\"payments\":[{\"paymentMethodType\":\"ACH\",\"amountCents\":$TOTAL}]}}")
+
+# Extract Stripe PaymentIntent details from the response
+PI_ID=$(echo "$PAY_RESULT" | jq -r '.included.payments[0].gatewayData.paymentIntentId')
+CLIENT_SECRET=$(echo "$PAY_RESULT" | jq -r '.included.payments[0].gatewayData.clientSecret')
+echo "PaymentIntent: $PI_ID"
+
+# 8. Confirm the PaymentIntent with Stripe using the saved card
+PM_ID="pm_1Sygm4CMyY4UUjhBOhNeoApv"  # from step 6
+STRIPE_PK="pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB"
+curl -s -X POST "https://api.stripe.com/v1/payment_intents/$PI_ID/confirm" \
+  -u "$STRIPE_PK:" \
+  -d "payment_method=$PM_ID" \
+  -d "client_secret=$CLIENT_SECRET" | \
+  jq '{status, amount, currency}'
+# → { "status": "succeeded", "amount": 750, "currency": "usd" }
+
+# 9. Verify — order should show totalAmountRemaining: 0
+curl -s "https://api.rec.us/v1/orders/$ORDER_ID" \
+  -H "Authorization: Bearer $TOKEN" | \
+  jq '.order | {status, total, totalAmountRemaining}'
+```
+
+**Key differences from the free court flow:**
+- **Fixed-slots courts** require `timestampRange` to exactly match a pre-defined slot boundary (check `config.bookingPolicies`). Using a custom duration like `[16:30, 17:30)` will fail with `"The reservation violates the site's booking policy"`.
+- **Card payment** is a two-step process: (1) call `/pay` with `paymentMethodType: "ACH"` to create a Stripe PaymentIntent, then (2) confirm it via the Stripe API with a saved `payment_method` ID.
+- The Stripe publishable key authenticates the `/confirm` call (passed as HTTP basic auth username with empty password).
+- After Stripe confirmation, rec.us is notified via webhook and the order settles automatically.
+- **Daily booking limits** exist per location/date (e.g. 1 reservation per day). Expired unpaid orders may still count against the limit temporarily. The error is `E_INELIGIBLE_SITE_BOOKING` with a message like `"Daily booking limit of 1 reached for March 1, 2026"`.
