@@ -765,7 +765,7 @@ Returns detailed information about a specific court/site, including whether it s
 - `noReservationText` — if set (e.g. `"Not Reservable"`), the court is walk-up only.
 - `config.bookingPolicies[]` — optional. When present with `type: "fixed-slots"`, the court uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with `"The reservation violates the site's booking policy"`. `dayOfWeek` uses 1=Monday through 7=Sunday. If no `bookingPolicies` are present, the court uses flexible booking with `allowedReservationDurations`.
 
-### Get site availability 🔒
+### Get site availability
 
 ```
 GET /v1/sites/{siteId}/availability
