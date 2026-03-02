@@ -26,27 +26,27 @@ Sport (tennis, pickleball, yoga, etc.)
 Region (geographic area — "San Francisco Area", "East Bay", etc.)
 Organization (city/district rec department)
 ├── Location (physical park/facility)
-│   └── Court / Site (individual court — tennis, pickleball, etc.)
+│   └── Site (bookable unit — court, field, picnic table, room, etc.)
 ├── Instructor (private lesson instructor)
 └── Section (group class or lesson pack)
     └── Session (individual meeting within a section)
 
-Facility Rental (a court booking)
-├── Reservation (the time slot hold on a court)
+Facility Rental (a site booking)
+├── Reservation (the time slot hold on a site)
 └── Order (the transaction)
     └── Payment (settling the order)
 ```
 
-- **Sport** — a sport or activity (e.g. Tennis, Pickleball, Yoga). Referenced by courts, instructors, and sections. Has a stable UUID.
+- **Sport** — a sport or activity (e.g. Tennis, Pickleball, Yoga). Referenced by sites, instructors, and sections. Has a stable UUID.
 - **Region** — a geographic area (e.g. "San Francisco Area", "East Bay"). Used to discover locations across multiple organizations. Has a lat/lng center and radius.
 - **Organization** — a municipal parks & rec department (e.g. "San Francisco Rec & Park"). Has a slug for URL-friendly access. Configures which features are enabled (court reservations, coaching, lesson packs, facility rentals).
-- **Location** — a park or facility with courts. Has address, hours, play guidelines, and a reservation window (how many days in advance you can book).
-- **Court / Site** — an individual court within a location (called "site" in the API). Has a sport, pricing, allowed reservation durations, and max reservation time. Some courts are not reservable (walk-up only). May support instant booking.
+- **Location** — a park or facility with bookable sites. Has address, hours, play guidelines, and a reservation window (how many days in advance you can book).
+- **Site** — a bookable unit within a location. Has an optional `type` field (e.g. `"court"`, `"field"`, `"room"`, `"picnic-table"`, `"outdoor-event-space"`, `"bounce-house"`, `"rink"`; may also be `null`). Has pricing, allowed reservation durations, and max reservation time. Some sites are not reservable (walk-up only). May support instant booking. **Note:** The API uses "site" in endpoint paths (`/v1/sites/{siteId}`) and error messages, but many response keys use the legacy name `courts` or `courtNumber` even when the site is not a court.
 - **Instructor** — a coach who offers private lessons at specific locations. Has a profile, sport-specific hourly rates, and available lesson time slots.
 - **Section** — a group class or lesson pack (e.g. "Pickleball Small Group Lessons - Adults"). Has a facilitator, capacity, multiple sessions over several weeks.
 - **Session** — an individual meeting within a section, with a specific date/time.
-- **Schedule** — the per-court time slot grid for a location on a given date. Each slot is either RESERVABLE, RESERVATION (booked), or OPEN (not reservable).
-- **Facility Rental** — a court booking created via `POST /v1/facility-rentals`. Wraps a reservation and an order. Has a status (`confirmed`) and booking type (`instant`).
+- **Schedule** — the per-site time slot grid for a location on a given date. Each slot is either RESERVABLE, RESERVATION (booked), or OPEN (not reservable).
+- **Facility Rental** — a site booking created via `POST /v1/facility-rentals`. Wraps a reservation and an order. Has a status (`confirmed`) and booking type (`instant`).
 - **Order** — the transactional record for a booking. Created with `pending` status and a ~10 minute expiration. Must be paid (even if $0) to finalize.
 - **Payment** — settles an order. Has a method type (e.g. `free`, `cardOnline`) and amount in cents.
 
@@ -80,7 +80,7 @@ Returns all sports/activities on the platform.
 ```
 
 **Notes:**
-- Sport IDs are stable and referenced by `courts[].sports[].sportId` in location/availability responses and `sports[].id` in schedule responses.
+- Sport IDs are stable and referenced by `courts[].sports[].sportId` in location/availability responses (note: the `courts` key contains all site types, not just courts) and `sports[].id` in schedule responses.
 - Includes non-court activities (e.g. Guitar, Yoga, Day Camp) used by the programs/sections system.
 
 ---
@@ -221,6 +221,8 @@ GET /v1/locations/{locationId}
 **Query params:**
 - `publishedSites` — `"true"` to include published site info (optional)
 
+**Note:** The response nests sites under a `courts` key, but this array contains **all** site types (courts, fields, rooms, picnic tables, etc.), not just courts. Similarly, `courtNumber` is the display name for any site type (e.g. `"Court 1"`, `"Picnic Table A"`, `"Room 201"`).
+
 **Response:**
 
 ```json
@@ -297,12 +299,14 @@ GET /v1/locations/{locationId}
 ```
 
 **Notes:**
-- `courts[].noReservationText` — if set (e.g. `"Not Reservable"`), the court is walk-up only.
+- `courts[]` — despite the key name, contains all site types. Each entry has a `type` field (e.g. `"court"`, `"field"`, `"room"`, or `null`).
+- `courts[].courtNumber` — the display name for any site (e.g. `"Court 1"`, `"Field A"`, `"Room 201"`), despite the field name.
+- `courts[].noReservationText` — if set (e.g. `"Not Reservable"`), the site is walk-up only.
 - `courts[].sports[].sportId` — references a global sport. The sport **name** is not included here; it appears in the schedule endpoint. Known sport IDs:
   - `bd745b6e-1dd6-43e2-a69f-06f094808a96` — Tennis
 - `defaultReservationWindow` — how many days in advance reservations open (e.g. 7 = one week ahead).
 - `reservationReleaseTimeLocal` — the local time when new reservation slots become available (e.g. `"08:00:00"` = 8 AM).
-- `playGuidelines` — detailed markdown with reservation rules, court assignments, hours, etc. Very useful for understanding location-specific policies.
+- `playGuidelines` — detailed markdown with reservation rules, site assignments, hours, etc. Very useful for understanding location-specific policies.
 
 ---
 
@@ -312,15 +316,15 @@ Three endpoints return time slot / availability data. They overlap significantly
 
 | | `GET /v1/locations/{id}/schedule` | `GET /v1/locations/availability` | `GET /v1/sites/{id}/availability` |
 |---|---|---|---|
-| **Intent** | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific court |
-| **Scope** | Single location, all courts | Multi-location (filter by org, region, or lat/lng) | Single court/site |
-| Court ID (UUID) | Only indirectly, via `reservations[].courts[]` (booked slots only) | Yes, per court | N/A (you provide it) |
+| **Intent** | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific site |
+| **Scope** | Single location, all sites | Multi-location (filter by org, region, or lat/lng) | Single site |
+| Site ID (UUID) | Only indirectly, via `reservations[].courts[]` (booked slots only; key name is misleading) | Yes, per site (in `courts[].id`) | N/A (you provide it) |
 | Sport names | Yes (`sports[].name`) | No (only `sportId`) | No |
 | All slot states | Yes — RESERVABLE, RESERVATION, OPEN | No — available start times only | No — available start times only |
 | Who booked each slot | Yes — `users` dict with names, skill levels | No | No |
-| Per-slot available durations | No | No (only court-level `allowedReservationDurations`) | Yes (`availableDurationsMinutes` per time) |
-| Pricing | Only on booked reservations (`reservationCost`) | Yes, per court (`config.pricing`) | No |
-| `isInstantBookable` | No | Yes, per court | No |
+| Per-slot available durations | No | No (only site-level `allowedReservationDurations`) | Yes (`availableDurationsMinutes` per time) |
+| Pricing | Only on booked reservations (`reservationCost`) | Yes, per site (`config.pricing`) | No |
+| `isInstantBookable` | No | Yes, per site | No |
 | Multi-location | No | Yes | No |
 | Date range | Explicit `startDate`/`endDate` params | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) |
 
@@ -328,13 +332,13 @@ Three endpoints return time slot / availability data. They overlap significantly
 
 ## Schedule
 
-### Get court schedule
+### Get schedule
 
 ```
 GET /v1/locations/{locationId}/schedule?startDate={YYYY-MM-DD}[&endDate={YYYY-MM-DD}]
 ```
 
-Returns the schedule for **all courts** at a location for the given date range.
+Returns the schedule for **all sites** at a location for the given date range.
 
 **Path params:**
 - `locationId` — UUID
@@ -429,11 +433,13 @@ Returns the schedule for **all courts** at a location for the given date range.
 | `RESERVATION` | Already booked — `referenceId` links to the `reservations` dict |
 | `OPEN` | Not reservable — `referenceLabel` explains why (e.g. "Not Reservable" for walk-up courts or outside bookable hours) |
 
-**`reservations` dict:** Keyed by reservation UUID. Contains cost (in cents), who booked it (`users[]`), which court (`courts[]`), and whether it's a regular court reservation, lesson, or class.
+**`reservations` dict:** Keyed by reservation UUID. Contains cost (in cents), who booked it (`users[]`), which site (`courts[]` — key name is misleading), and whether it's a regular reservation, lesson, or class.
 
 **`users` dict:** Keyed by user UUID. Only shows first initial and last initial for privacy. Includes `skillLevel` (e.g. "first-timer", "beginner", "intermediate", "advanced").
 
-**`instructors`, `classes`, `sessions`, `facilityRentals` dicts:** Populated when the schedule includes instructor lessons, group classes, or facility rentals. Empty for pure court reservation schedules.
+**`instructors`, `classes`, `sessions`, `facilityRentals` dicts:** Populated when the schedule includes instructor lessons, group classes, or facility rentals. Empty for pure reservation schedules.
+
+**Note:** The schedule response uses `courtNumber` as the display name for each site entry, even for non-court site types. There is no site UUID in the schedule's per-site entries — only `courtNumber` and `sports`. Site UUIDs appear only in `reservations[].courts[]` for booked slots.
 
 ---
 
@@ -446,7 +452,7 @@ GET /v1/locations/availability?regionId={regionId}
 GET /v1/locations/availability?organizationSlug={slug}
 ```
 
-Returns all locations with their courts and available time slots. This is the multi-location equivalent of the schedule endpoint — instead of detailed per-slot status for one location, it returns a flat list of bookable slot timestamps across many locations at once.
+Returns all locations with their sites and available time slots. This is the multi-location equivalent of the schedule endpoint — instead of detailed per-slot status for one location, it returns a flat list of bookable slot timestamps across many locations at once. Also serves as the only way to list locations for a specific organization (the `GET /v1/locations` endpoint does not support org filtering).
 
 **Query params (at least one required):**
 - `regionId` — UUID of a region
@@ -508,11 +514,12 @@ Returns all locations with their courts and available time slots. This is the mu
 ```
 
 **Notes:**
+- `courts[]` — despite the key name, contains all site types (courts, fields, rooms, picnic tables, etc.). Each entry has a `type` field.
 - `availableSlots` — flat list of bookable start times as `"YYYY-MM-DD HH:MM:SS"` strings in the location's timezone. Covers the upcoming reservation window (typically 7 days).
 - `slots` — the recurring weekly schedule template (which hours are open for booking on each day of week). `dayOfWeek` uses 0=Sunday, 1=Monday, etc.
 - `distance` — populated when filtering by lat/lng, otherwise null.
 - `sports[].sportId` — references the global sport ID but does **not** include the sport name. Use the schedule endpoint or cross-reference with known sport IDs.
-- Only locations with at least one court are returned. Locations with zero available slots are still included (check `availableSlots` length).
+- Only locations with at least one site are returned. Locations with zero available slots are still included (check `availableSlots` length).
 
 **Example: Find all SF locations with open pickleball slots:**
 
@@ -732,9 +739,9 @@ Requires authentication. Body: `{ "data": { ... } }`.
 
 ---
 
-## Courts / Sites
+## Sites
 
-Courts are also referred to as "sites" in the API. The `courts[].id` from the location endpoint is the same as the `siteId` used here.
+Sites are the bookable units within a location. The API uses "site" in endpoint paths (`/v1/sites/{siteId}`), but legacy response keys use `courts` and `courtNumber` (see Locations section). The `courts[].id` from the location endpoint is the same as the `siteId` used here.
 
 ### Get site detail
 
@@ -742,7 +749,7 @@ Courts are also referred to as "sites" in the API. The `courts[].id` from the lo
 GET /v1/sites/{siteId}
 ```
 
-Returns detailed information about a specific court/site, including whether it supports instant booking.
+Returns detailed information about a specific site, including whether it supports instant booking.
 
 **Response:**
 
@@ -780,10 +787,11 @@ Returns detailed information about a specific court/site, including whether it s
 ```
 
 **Notes:**
+- `courtNumber` — the display name (e.g. `"A"`, `"Court 1"`, `"Picnic Table 3"`), despite the field name.
 - `capacity` — 0 means no cap on attendees.
-- `isInstantBookable` — if `true`, the court can be booked directly via the facility-rentals endpoint. If `false`, the court may require a request/approval flow.
-- `noReservationText` — if set (e.g. `"Not Reservable"`), the court is walk-up only.
-- `config.bookingPolicies[]` — optional. When present with `type: "fixed-slots"`, the court uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with `"The reservation violates the site's booking policy"`. `dayOfWeek` uses 1=Monday through 7=Sunday. If no `bookingPolicies` are present, the court uses flexible booking with `allowedReservationDurations`.
+- `isInstantBookable` — if `true`, the site can be booked directly via the facility-rentals endpoint. If `false`, the site may require a request/approval flow.
+- `noReservationText` — if set (e.g. `"Not Reservable"`), the site is walk-up only.
+- `config.bookingPolicies[]` — optional. When present with `type: "fixed-slots"`, the site uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with `"The reservation violates the site's booking policy"`. `dayOfWeek` uses 1=Monday through 7=Sunday. If no `bookingPolicies` are present, the site uses flexible booking with `allowedReservationDurations`.
 
 ### Get site availability
 
@@ -791,7 +799,7 @@ Returns detailed information about a specific court/site, including whether it s
 GET /v1/sites/{siteId}/availability
 ```
 
-Returns available dates and time slots for a specific court/site.
+Returns available dates and time slots for a specific site.
 
 **Response:**
 
@@ -821,13 +829,13 @@ GET /v1/sites/{siteId}/instant-booking-configuration
 
 Returns the instant booking configuration for a site, if one exists. Returns 404 if not configured.
 
-### Get court add-ons
+### Get site add-ons
 
 ```
 GET /v1/sites/{siteId}/addons
 ```
 
-Returns add-ons available when booking a specific court. Response: `{ "data": [] }`.
+Returns add-ons available when booking a specific site. Response: `{ "data": [] }`.
 
 ---
 
@@ -940,10 +948,10 @@ Returns a Stripe SetupIntent and the user's saved payment methods for a given or
 - `setupIntentId` / `clientSecret` — a Stripe SetupIntent for adding new payment methods (not needed for paying with an existing saved card).
 - `organizationId` is required because payment methods are scoped per Stripe Connect account (each organization has its own).
 
-### Court Reservations (Facility Rentals)
+### Site Reservations (Facility Rentals)
 
 ```
-POST   /v1/facility-rentals                        → create a court reservation
+POST   /v1/facility-rentals                        → create a site reservation
 ```
 
 **Request body:**
@@ -962,9 +970,9 @@ POST   /v1/facility-rentals                        → create a court reservatio
 
 **Notes:**
 - `timestampRange` — PostgreSQL-style range: `[` = inclusive start, `)` = exclusive end. Times are in the location's timezone.
-- `courtIds` — array of court/site UUIDs. Typically one court per reservation.
-- Do **not** include `attendeeCount` for courts with `capacity: 0` (uncapped), or the API will reject with `"Attendee count exceeds site capacity"`.
-- The court must have `isInstantBookable: true` (check via `GET /v1/sites/{siteId}`).
+- `courtIds` — array of site UUIDs to reserve. Despite the name, accepts any site type (court, field, room, etc.). Typically one site per reservation.
+- Do **not** include `attendeeCount` for sites with `capacity: 0` (uncapped), or the API will reject with `"Attendee count exceeds site capacity"`.
+- The site must have `isInstantBookable: true` (check via `GET /v1/sites/{siteId}`).
 
 **Response (201 Created):**
 
@@ -1184,7 +1192,7 @@ POST   /v1/payments/{paymentId}/cancel              → cancel payment
 
 ---
 
-## Example: Find Available Pickleball Courts
+## Example: Find Available Pickleball Sites
 
 ```bash
 # 1. List organizations
@@ -1220,9 +1228,9 @@ curl -s 'https://api.rec.us/v1/discovery/programmed?organizationId=17380e28-7e02
   jq '.[] | {name: .name, sport: .sportName, location: .locationName, spots: (.capacity - .participantCount), sessions: (.sessions | length)}'
 ```
 
-## Example: Book a Free Court (Full Flow)
+## Example: Book a Free Site (Full Flow)
 
-End-to-end example booking a free pickleball court at Granada Park.
+End-to-end example booking a free pickleball site at Granada Park.
 
 ```bash
 # 1. Authenticate
@@ -1242,9 +1250,9 @@ LOCATION_ID="38a201f0-4fb1-4991-8e72-db8a9495319e"
 curl -s "https://api.rec.us/v1/locations/$LOCATION_ID/schedule?startDate=2026-03-05" | \
   jq '.dates["20260305"][] | select(.sports[].name == "Pickleball") | {court: .courtNumber, slots: [.schedule | to_entries[] | select(.value.referenceType == "RESERVABLE") | .key]}'
 
-# 4. Verify the court supports instant booking
-COURT_ID="99b7129e-5ed4-4fd8-aba2-fee1683310bb"   # Court A
-curl -s "https://api.rec.us/v1/sites/$COURT_ID" \
+# 4. Verify the site supports instant booking
+SITE_ID="99b7129e-5ed4-4fd8-aba2-fee1683310bb"   # Site A (court)
+curl -s "https://api.rec.us/v1/sites/$SITE_ID" \
   -H "Authorization: Bearer $TOKEN" | \
   jq '.data | {id, courtNumber, isInstantBookable, capacity}'
 
@@ -1257,7 +1265,7 @@ ORDER_ID=$(curl -s -X POST 'https://api.rec.us/v1/facility-rentals' \
       \"reservation\": {
         \"timestampRange\": \"[2026-03-05 13:00:00, 2026-03-05 14:00:00)\",
         \"locationId\": \"$LOCATION_ID\",
-        \"courtIds\": [\"$COURT_ID\"]
+        \"courtIds\": [\"$SITE_ID\"]
       }
     }
   }" | jq -r '.data.order.id')
@@ -1279,20 +1287,20 @@ curl -s "https://api.rec.us/v1/locations/$LOCATION_ID/schedule?startDate=2026-03
 
 **Key points:**
 - After `POST /v1/facility-rentals`, the order is `"pending"` with a ~10 minute expiration. You **must** call `POST /v1/orders/{orderId}/pay` to finalize it.
-- For free courts, use `paymentMethodType: "free"` with `amountCents: 0`.
+- For free sites, use `paymentMethodType: "free"` with `amountCents: 0`.
 - The `timestampRange` uses PostgreSQL range syntax: `[start, end)` — inclusive start, exclusive end.
 - Times in `timestampRange` are in the location's local timezone (e.g. `America/Los_Angeles`).
 
-## Example: Book a Paid Court (Full Flow)
+## Example: Book a Paid Site (Full Flow)
 
-Same as the free court flow above, but diverges at step 4 — the court has a `fixed-slots` booking policy, and payment requires a Stripe confirmation step.
+Same as the free site flow above, but diverges at step 4 — the site has a `fixed-slots` booking policy, and payment requires a Stripe confirmation step.
 
 ```bash
-# Steps 1-3 are the same as "Book a Free Court" (authenticate, find location, check schedule).
+# Steps 1-3 are the same as "Book a Free Site" (authenticate, find location, check schedule).
 
 # 4. Get site detail — check booking policy and pricing
-COURT_ID="040a5a1a-443a-4641-b079-ed7e650bd5ac"   # J.P. Murphy Court 3
-curl -s "https://api.rec.us/v1/sites/$COURT_ID" \
+SITE_ID="040a5a1a-443a-4641-b079-ed7e650bd5ac"   # J.P. Murphy site "Court 3"
+curl -s "https://api.rec.us/v1/sites/$SITE_ID" \
   -H "Authorization: Bearer $TOKEN" | \
   jq '.data | {id, courtNumber, isInstantBookable, noReservationText,
     pricing: .config.pricing.default,
@@ -1311,7 +1319,7 @@ RESULT=$(curl -s -X POST 'https://api.rec.us/v1/facility-rentals' \
       \"reservation\": {
         \"timestampRange\": \"[2026-03-01 16:30:00, 2026-03-01 18:00:00)\",
         \"locationId\": \"$LOCATION_ID\",
-        \"courtIds\": [\"$COURT_ID\"]
+        \"courtIds\": [\"$SITE_ID\"]
       }
     }
   }")
@@ -1358,8 +1366,8 @@ curl -s "https://api.rec.us/v1/orders/$ORDER_ID" \
   jq '.order | {status, total, totalAmountRemaining}'
 ```
 
-**Key differences from the free court flow:**
-- **Fixed-slots courts** require `timestampRange` to exactly match a pre-defined slot boundary (check `config.bookingPolicies`). Using a custom duration like `[16:30, 17:30)` will fail with `"The reservation violates the site's booking policy"`.
+**Key differences from the free site flow:**
+- **Fixed-slots sites** require `timestampRange` to exactly match a pre-defined slot boundary (check `config.bookingPolicies`). Using a custom duration like `[16:30, 17:30)` will fail with `"The reservation violates the site's booking policy"`.
 - **Card payment** is a two-step process: (1) call `/pay` with `paymentMethodType: "ACH"` to create a Stripe PaymentIntent, then (2) confirm it via the Stripe API with a saved `payment_method` ID.
 - The Stripe publishable key authenticates the `/confirm` call (passed as HTTP basic auth username with empty password).
 - After Stripe confirmation, rec.us is notified via webhook and the order settles automatically.
