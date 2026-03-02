@@ -306,6 +306,26 @@ GET /v1/locations/{locationId}
 
 ---
 
+## Availability & Schedule — Endpoint Comparison
+
+Three endpoints return time slot / availability data. They overlap significantly but each has unique fields.
+
+| | `GET /v1/locations/{id}/schedule` | `GET /v1/locations/availability` | `GET /v1/sites/{id}/availability` |
+|---|---|---|---|
+| **Intent** | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific court |
+| **Scope** | Single location, all courts | Multi-location (filter by org, region, or lat/lng) | Single court/site |
+| Court ID (UUID) | Only indirectly, via `reservations[].courts[]` (booked slots only) | Yes, per court | N/A (you provide it) |
+| Sport names | Yes (`sports[].name`) | No (only `sportId`) | No |
+| All slot states | Yes — RESERVABLE, RESERVATION, OPEN | No — available start times only | No — available start times only |
+| Who booked each slot | Yes — `users` dict with names, skill levels | No | No |
+| Per-slot available durations | No | No (only court-level `allowedReservationDurations`) | Yes (`availableDurationsMinutes` per time) |
+| Pricing | Only on booked reservations (`reservationCost`) | Yes, per court (`config.pricing`) | No |
+| `isInstantBookable` | No | Yes, per court | No |
+| Multi-location | No | Yes | No |
+| Date range | Explicit `startDate`/`endDate` params | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) |
+
+---
+
 ## Schedule
 
 ### Get court schedule
