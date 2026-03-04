@@ -19,6 +19,49 @@ Common error types: `E_UNAUTHORIZED`, `E_COURT_NOT_FOUND`, `E_SECTION_NOT_FOUND`
 
 ---
 
+## Pagination
+
+Some list endpoints are **paginated** (default page size 25) — callers must iterate pages to get all results. Others return the full dataset in a single response.
+
+### Parameters
+
+All paginated endpoints accept **either** of these equivalent param styles:
+
+| Style | Params |
+|---|---|
+| Bracket (`qs`) | `pg[num]=1&pg[size]=25` |
+| Flat | `page=1&pageSize=25` |
+
+Both styles are interchangeable on every paginated endpoint. Page numbers are 1-indexed.
+
+### Response envelopes
+
+The response shape is fixed per endpoint (does not depend on which param style you use). Two envelope styles exist:
+
+**`data`/`meta` envelope**:
+
+```json
+{
+  "data": [ ... ],
+  "meta": { "pg": { "num": 1, "size": 25, "totalResults": 49 } }
+}
+```
+
+More pages exist while `pg.num * pg.size < pg.totalResults`.
+
+**`results`/`total` envelope**:
+
+```json
+{
+  "results": [ ... ],
+  "total": 157
+}
+```
+
+More pages exist while `page * pageSize < total`. The response does not echo back the current page number.
+
+---
+
 ## Entity Model
 
 ```
@@ -126,28 +169,24 @@ Returns all geographic regions.
 GET /v1/organizations
 ```
 
-Returns all organizations on the platform.
+Returns all organizations on the platform. **Paginated** (`data`/`meta` envelope — see Pagination).
 
-**Response:**
+**Response item:**
 
 ```json
 {
-  "data": [
-    {
-      "id": "17380e28-7e02-4b52-82c5-fab18557fd7a",
-      "slug": "san-francisco-rec-park",
-      "name": "San Francisco Rec & Park",
-      "displayName": "San Francisco Rec & Park",
-      "logo": "https://prod-rec-tech-img-bucket-8656aa2.s3.us-west-1.amazonaws.com/...",
-      "fullLogo": "https://...",
-      "config": {
-        "general": {
-          "primaryState": "California",
-          "primaryTimezone": "America/Los_Angeles"
-        }
-      }
+  "id": "17380e28-7e02-4b52-82c5-fab18557fd7a",
+  "slug": "san-francisco-rec-park",
+  "name": "San Francisco Rec & Park",
+  "displayName": "San Francisco Rec & Park",
+  "logo": "https://prod-rec-tech-img-bucket-8656aa2.s3.us-west-1.amazonaws.com/...",
+  "fullLogo": "https://...",
+  "config": {
+    "general": {
+      "primaryState": "California",
+      "primaryTimezone": "America/Los_Angeles"
     }
-  ]
+  }
 }
 ```
 
@@ -302,6 +341,10 @@ GET /v1/locations/{locationId}
 - `courts[]` — despite the key name, contains all site types. Each entry has a `type` field (e.g. `"court"`, `"field"`, `"room"`, or `null`).
 - `courts[].courtNumber` — the display name for any site (e.g. `"Court 1"`, `"Field A"`, `"Room 201"`), despite the field name.
 - `courts[].noReservationText` — if set (e.g. `"Not Reservable"`), the site is walk-up only.
+- `courts[].availableSlots` — bookable start times as `"YYYY-MM-DD HH:MM:SS"` strings in the location's timezone. Covers the upcoming reservation window. Not shown in the example above but always present in the response.
+- `courts[].allowedReservationDurations` — the set of durations this site supports.
+- `courts[].config.bookingPolicies` — optional. When present with `type: "fixed-slots"` and `isActive: true`, the site uses pre-defined time blocks. Not shown in the example above. See "Computing per-slot durations client-side" below.
+- `courts[].isInstantBookable` — whether the site can be booked directly. Not shown in the example above but always present.
 - `courts[].sports[].sportId` — references a global sport. The sport **name** is not included here; it appears in the schedule endpoint. Known sport IDs:
   - `bd745b6e-1dd6-43e2-a69f-06f094808a96` — Tennis
 - `defaultReservationWindow` — how many days in advance reservations open (e.g. 7 = one week ahead).
@@ -312,21 +355,66 @@ GET /v1/locations/{locationId}
 
 ## Availability & Schedule — Endpoint Comparison
 
-Three endpoints return time slot / availability data. They overlap significantly but each has unique fields.
+Four endpoints return time slot / availability data. They overlap significantly but each has unique fields. The rec.us frontend uses them in different contexts:
 
-| | `GET /v1/locations/{id}/schedule` | `GET /v1/locations/availability` | `GET /v1/sites/{id}/availability` |
-|---|---|---|---|
-| **Intent** | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific site |
-| **Scope** | Single location, all sites | Multi-location (filter by org, region, or lat/lng) | Single site |
-| Site ID (UUID) | Only indirectly, via `reservations[].courts[]` (booked slots only; key name is misleading) | Yes, per site (in `courts[].id`) | N/A (you provide it) |
-| Sport names | Yes (`sports[].name`) | No (only `sportId`) | No |
-| All slot states | Yes — RESERVABLE, RESERVATION, OPEN | No — available start times only | No — available start times only |
-| Who booked each slot | Yes — `users` dict with names, skill levels | No | No |
-| Per-slot available durations | No | No (only site-level `allowedReservationDurations`) | Yes (`availableDurationsMinutes` per time) |
-| Pricing | Only on booked reservations (`reservationCost`) | Yes, per site (`config.pricing`) | No |
-| `isInstantBookable` | No | Yes, per site | No |
-| Multi-location | No | Yes | No |
-| Date range | Explicit `startDate`/`endDate` params | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) |
+- **Location search** (`/locations` page) — calls `GET /v1/locations/availability` to discover which locations have open slots across an org or region.
+- **Location detail / court booking** (`/locations/[locationId]` page) — calls `GET /v1/locations/{id}` (with `publishedSites=true`) for site metadata + available start times, and `GET /v1/locations/{id}/schedule` for the visual day grid. Per-slot durations are computed client-side from `availableSlots` + `allowedReservationDurations` (see below). The booking flow happens inline on this page.
+- **Facility rental booking** (`/sites/[siteId]` page) — calls `GET /v1/sites/{id}/availability` for per-slot duration options. This page is reached from the **Facility Rentals tab** on the org page (`/organizations/[slug]?tab=facilityRentals`), which lists sites via `GET /v1/sites?organizationId={id}`. Each site card links to `/sites/{siteId}`. This flow is used for non-court site types (picnic tables, rooms, event spaces, bounce houses, etc.).
+
+The main court reservation flow (`/locations/[locationId]`) **never calls** `GET /v1/sites/{id}/availability` — it computes equivalent data client-side. Only the standalone `/sites/[siteId]` page uses that endpoint.
+
+| | `GET /v1/locations/{id}` | `GET /v1/locations/availability` | `GET /v1/sites/{id}/availability` | `GET /v1/locations/{id}/schedule` |
+|---|---|---|---|---|
+| **Intent** | "What can I book here?" — single location with bookable start times per site | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific site | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots |
+| **Frontend usage** | Location detail page — site metadata + booking flow | Location search/map page | `/sites/[siteId]` page (facility rentals only) | Location detail page — visual schedule grid |
+| **Scope** | Single location, all sites | Multi-location (filter by org, region, or lat/lng) | Single site | Single location, all sites |
+| Site ID (UUID) | Yes, per site (in `courts[].id`) | Yes, per site (in `courts[].id`) | N/A (you provide it) | Only indirectly, via `reservations[].courts[]` (booked slots only; key name is misleading) |
+| Available start times | Yes (`courts[].availableSlots`) | Yes (`courts[].availableSlots`) | Yes (keys of `data[date]`) | No (has RESERVABLE ranges, not individual start times) |
+| Sport names | No (only `sportId`) | No (only `sportId`) | No | Yes (`sports[].name`) |
+| All slot states | No — available start times only | No — available start times only | No — available start times only | Yes — RESERVABLE, RESERVATION, OPEN |
+| Who booked each slot | No | No | No | Yes — `users` dict with names, skill levels |
+| Per-slot available durations | No (can be computed client-side — see below) | No (can be computed client-side — see below) | Yes (`availableDurationsMinutes` per time) | No |
+| Booking policies | Yes (`courts[].config.bookingPolicies`) | Yes (`courts[].config.bookingPolicies`) | No | No |
+| `allowedReservationDurations` | Yes, per site | Yes, per site | No | No |
+| Pricing | Yes, per site (`config.pricing`) | Yes, per site (`config.pricing`) | No | Only on booked reservations (`reservationCost`) |
+| `isInstantBookable` | Yes, per site | Yes, per site | No | No |
+| Multi-location | No | Yes | No | No |
+| Date range | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) | Explicit `startDate`/`endDate` params |
+
+### Computing per-slot durations client-side
+
+`GET /v1/sites/{id}/availability` returns `availableDurationsMinutes` per time slot, but requires one request per site — impractical for multi-site views. Both `GET /v1/locations/{id}` and `GET /v1/locations/availability` return enough data to compute equivalent durations client-side (this is what the rec.us frontend does for court reservations on the location detail page).
+
+Each site (in `courts[]`) provides three relevant fields:
+- `availableSlots` — bookable start times as `"YYYY-MM-DD HH:MM:SS"` strings
+- `allowedReservationDurations.minutes` — e.g. `[30, 60, 90]`
+- `config.bookingPolicies[]` — optional; when present with `type: "fixed-slots"` and `isActive: true`, the site uses pre-defined time blocks
+
+**Fixed-slot sites** (active `bookingPolicies` with `type: "fixed-slots"`):
+
+The `bookingPolicies[].slots` array defines the valid time blocks per day of week (`dayOfWeek` 1=Mon…7=Sun). Each slot has `startTimeLocal` and `endTimeLocal`. For each block whose `startTimeLocal` (truncated to `HH:MM`) appears in `availableSlots` on a matching day-of-week, the only available duration is `endTimeLocal - startTimeLocal`. The `allowedReservationDurations` field is ignored — it contains a stale superset.
+
+Note: `availableSlots` for fixed-slot sites includes every 30-minute tick within the open range (e.g. `07:30`, `08:00`, `08:30` for a 07:30–09:00 block), but only the block start times are valid booking starts.
+
+**Flexible-booking sites** (no active `bookingPolicies`, or `isActive: false`):
+
+For each start time in `availableSlots`, check which durations from `allowedReservationDurations.minutes` are feasible by verifying that all consecutive 30-minute sub-slots exist:
+
+```
+for each duration in allowedReservationDurations.minutes (ascending):
+    feasible = true
+    for offset in 0, 30, 60, ... (duration - 30):
+        if (startTime + offset) not in availableSlots for that date:
+            feasible = false; break
+    if feasible: include duration
+```
+
+For example, with `allowedReservationDurations: [30, 60, 90]` and `availableSlots` containing `17:00, 17:30, 18:00` but not `18:30`:
+- At 17:00: `[30, 60, 90]` (17:00, 17:30, 18:00 all present)
+- At 17:30: `[30, 60]` (17:30, 18:00 present; 18:30 missing)
+- At 18:00: `[30]` (18:00 present; 18:30 missing)
+
+This computation produces results identical to `GET /v1/sites/{id}/availability`.
 
 ---
 
@@ -743,6 +831,21 @@ Requires authentication. Body: `{ "data": { ... } }`.
 
 Sites are the bookable units within a location. The API uses "site" in endpoint paths (`/v1/sites/{siteId}`), but legacy response keys use `courts` and `courtNumber` (see Locations section). The `courts[].id` from the location endpoint is the same as the `siteId` used here.
 
+### List sites for an organization
+
+```
+GET /v1/sites?organizationId={id}
+```
+
+Returns facility-rental sites for a given organization. **Paginated** (`results`/`total` envelope — see Pagination).
+
+**Only returns non-court site types** (picnic tables, bounce houses, gyms, outdoor event spaces, etc.). Courts, fields, and rinks are **not** included — those are accessed exclusively through the location endpoints (`GET /v1/locations/{id}` and `GET /v1/locations/availability`). Organizations that only have courts (e.g. `san-francisco-rec-park`) return `total: 0`.
+
+**Query params:**
+- `organizationId` — UUID (required)
+
+**Response items** have the same shape as `GET /v1/sites/{siteId}` `.data`.
+
 ### Get site detail
 
 ```
@@ -807,17 +910,17 @@ Returns available dates and time slots for a specific site.
 {
   "data": {
     "2026-03-05": {
-      "08:00": { "availableDurationsMinutes": [30, 60, 90, 120] },
-      "08:30": { "availableDurationsMinutes": [30, 60, 90] },
-      "13:00": { "availableDurationsMinutes": [30, 60, 90, 120] },
-      "13:30": { "availableDurationsMinutes": [30, 60, 90] }
+      "08:00:00": { "availableDurationsMinutes": [30, 60, 90, 120] },
+      "08:30:00": { "availableDurationsMinutes": [30, 60, 90] },
+      "13:00:00": { "availableDurationsMinutes": [30, 60, 90, 120] },
+      "13:30:00": { "availableDurationsMinutes": [30, 60, 90] }
     }
   }
 }
 ```
 
 **Notes:**
-- Keys are dates (`YYYY-MM-DD`), values are objects keyed by start time (`HH:MM`).
+- Keys are dates (`YYYY-MM-DD`), values are objects keyed by start time (`HH:MM:SS`).
 - Each time slot lists which durations (in minutes) are available starting at that time.
 - This endpoint is used by the frontend to populate the time and duration pickers.
 
@@ -1032,10 +1135,13 @@ POST   /v1/facility-rentals                        → create a site reservation
 ```
 GET    /v1/orders/current                          → current active order
 GET    /v1/orders/{orderId}                        → order detail (wraps response in "order" key)
+GET    /v2/orders/{orderId}                        → order detail v2 (supports include[]=installments)
 GET    /v1/orders/{orderId}/items                  → order line items
 GET    /v1/orders/{orderId}/transaction-events      → payment history
 POST   /v1/orders/{orderId}/pay                    → submit payment (see below)
 POST   /v1/orders/{orderId}/apply-discount          → apply discount/promo code
+DELETE /v1/orders/{orderId}                        → delete/cancel a pending order
+DELETE /v1/order-items/{orderItemId}               → remove an item from an order
 GET    /v1/orders?bookingId={bookingId}            → orders by booking
 ```
 
@@ -1174,6 +1280,274 @@ curl -s -X POST "https://api.stripe.com/v1/payment_intents/${PAYMENT_INTENT_ID}/
 ```
 
 Once Stripe confirms the payment, the rec.us order is automatically settled via webhook. The order's `totalAmountRemaining` drops to 0 and the payment status changes to `succeeded`.
+
+### Current User
+
+```
+🔒 GET /v1/users/me                                → current user profile
+```
+
+Returns the authenticated user's profile. The `id` field is the rec.us user UUID (not the Firebase UID).
+
+**Response:**
+
+```json
+{
+  "id": "9101112a-3912-4cda-8814-8cd29586bd0f",
+  "householdId": "7a8da9f0-93ce-4578-bfc8-61cc36fbfbf0",
+  "firebaseUserId": "1N78WJBXjdU1avTCTx9z1JkFWMv1",
+  "recId": "EID223",
+  "email": "user@example.com",
+  "role": "user",
+  "firstName": "John",
+  "lastName": "Doe",
+  "phone": "2234445555",
+  "formattedAddress": "455 Vallejo St., San Francisco, CA 94133, USA",
+  "skillLevel": "first-timer",
+  "isInstructor": false,
+  "memberships": [],
+  "organizationRoles": {},
+  "profile": {
+    "id": "profile-uuid",
+    "userId": "9101112a-3912-4cda-8814-8cd29586bd0f",
+    "dateOfBirth": null,
+    "gender": null,
+    "email": "user@example.com",
+    "phone": "2234445555"
+  }
+}
+```
+
+**Notes:**
+- The `id` (rec.us UUID) is needed for user-scoped endpoints like `/v1/users/{userId}/bookings`. This is **not** the same as `firebaseUserId`.
+
+### User's Bookings
+
+```
+🔒 GET /v1/users/{userId}/bookings                 → all bookings
+🔒 GET /v1/users/{userId}/planned-bookings          → upcoming bookings (sideloaded includes)
+```
+
+Both are **paginated** (`data`/`meta` envelope — see Pagination).
+
+**Response item:**
+
+```json
+{
+  "id": "75894d52-d00f-4fc3-acdc-6c94832dcf67",
+  "status": "confirmed",
+  "createdAt": "2026-02-26T18:25:05.718Z",
+  "updatedAt": "2026-02-26T18:25:23.032Z",
+  "canceledAt": null,
+  "cancelReason": null,
+  "canceledByUserId": null,
+  "creatorUserId": "user-uuid",
+  "customerUserId": "user-uuid",
+  "participantUserId": "user-uuid",
+  "organizationId": "org-uuid",
+  "isFastTrack": false,
+  "sectionId": null,
+  "sessionId": null,
+  "linkedReservationId": null,
+  "facilityRentalId": "facility-rental-uuid",
+  "type": "facilityRental",
+  "timeStatus": "future"
+}
+```
+
+**Notes:**
+- `timeStatus` — `"future"` for upcoming bookings, `"past"` for completed ones.
+- `canceledAt` — non-null if the booking was cancelled.
+- `type` — `"facilityRental"` for site bookings, `"session"` for group classes, etc.
+- `planned-bookings` returns only upcoming bookings and supports sideloaded includes (see below), but may return empty if no planned bookings exist.
+
+### Booking Detail
+
+```
+🔒 GET /v1/bookings/{bookingId}                    → single booking with includes
+```
+
+**Query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `include[]` | Sideloaded relations (repeatable). Values: `facilityRental`, `section`, `reservations`, `sites`, `locations`, `reservationSiteIds`, `customer`, `participant` |
+
+**Example:**
+
+```
+GET /v1/bookings/{bookingId}?include[]=facilityRental&include[]=reservations&include[]=sites&include[]=locations&include[]=reservationSiteIds
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "booking": {
+      "id": "booking-uuid",
+      "status": "confirmed",
+      "canceledAt": null,
+      "organizationId": "org-uuid",
+      "facilityRentalId": "facility-rental-uuid",
+      "type": "facilityRental"
+    }
+  },
+  "included": {
+    "facilityRental": {
+      "id": "facility-rental-uuid",
+      "name": "Court Reservation: A",
+      "status": "confirmed",
+      "bookingType": "instant",
+      "canceledAt": null
+    },
+    "reservations": [
+      {
+        "id": "reservation-uuid",
+        "locationId": "location-uuid",
+        "reservationCost": 0,
+        "reservationCostCurrency": "USD",
+        "reservationType": "court-reservation",
+        "reservationTimestampRange": ["2026-03-05 13:00:00", "2026-03-05 14:00:00"],
+        "startsAt": "2026-03-05T21:00:00.000Z",
+        "endsAt": "2026-03-05T22:00:00.000Z",
+        "canceledAt": null
+      }
+    ],
+    "sites": [
+      {
+        "id": "site-uuid",
+        "locationId": "location-uuid",
+        "courtNumber": "A",
+        "type": "court"
+      }
+    ],
+    "locations": [
+      {
+        "id": "location-uuid",
+        "name": "Granada Park",
+        "timezone": "America/Los_Angeles"
+      }
+    ],
+    "reservationSiteIds": {
+      "reservation-uuid": ["site-uuid"]
+    }
+  }
+}
+```
+
+### Cancelling a Booking
+
+```
+🔒 GET  /v1/bookings/{bookingId}/refund-eligibility-deadline  → check refund eligibility
+🔒 GET  /v1/bookings/{bookingId}/refund-preview               → preview refund amount & destinations
+🔒 POST /v1/bookings/{bookingId}/cancel                       → cancel the booking
+```
+
+#### Refund eligibility
+
+```
+GET /v1/bookings/{bookingId}/refund-eligibility-deadline
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "suggestionGenerated": true,
+    "eligibleUntil": "2026-03-04T10:00:00Z",
+    "recommendationJustification": "..."
+  }
+}
+```
+
+The frontend polls this every 1 second until `suggestionGenerated` is `true`. If `eligibleUntil` is in the future, a refund is available.
+
+#### Refund preview
+
+```
+GET /v1/bookings/{bookingId}/refund-preview
+```
+
+**Response (paid booking):**
+
+```json
+{
+  "data": {
+    "applicable": true,
+    "eligibleDestinations": ["original_payment_methods", "account_credit"],
+    "destinations": {
+      "originalPaymentMethods": {
+        "amountCents": 750,
+        "formattedAmount": "$7.50",
+        "destinationSummary": "Visa ending in 7510"
+      },
+      "accountCredit": {
+        "amountCents": 750,
+        "formattedAmount": "$7.50",
+        "destinationSummary": "Account credit"
+      }
+    },
+    "refundType": "full"
+  }
+}
+```
+
+**Response (free booking):**
+
+```json
+{
+  "data": {
+    "applicable": false,
+    "reason": "unsupported_booking_type"
+  }
+}
+```
+
+**Notes:**
+- `refundType` — `"full"`, `"partial"`, or `"zero"`.
+- `applicable: false` for free ($0) bookings — no refund preview needed, just cancel directly.
+
+#### Cancel
+
+```
+POST /v1/bookings/{bookingId}/cancel
+```
+
+**Request body (paid booking — choose refund destination):**
+
+```json
+{
+  "data": {
+    "refundDestination": "original_payment_methods"
+  }
+}
+```
+
+**Request body (free booking — no body needed):**
+
+Empty POST (no body, or empty `{}`).
+
+**Response (200 OK):**
+
+```json
+{
+  "data": {
+    "id": "booking-uuid",
+    "status": "confirmed",
+    "canceledAt": "2026-03-03T21:36:44.057Z",
+    "canceledByUserId": "user-uuid",
+    "facilityRentalId": "facility-rental-uuid",
+    "type": "facilityRental"
+  }
+}
+```
+
+**Notes:**
+- `canceledAt` is set on success. The `status` remains `"confirmed"` (not changed to `"cancelled"`).
+- `refundDestination` values: `"original_payment_methods"` or `"account_credit"`.
+- For free bookings, the `refund-preview` returns `applicable: false` — skip the refund flow and just POST cancel directly.
 
 ### Organizations (admin)
 
