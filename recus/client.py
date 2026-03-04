@@ -127,6 +127,7 @@ class AuthClient(Client):
             _FIREBASE_SIGNIN_URL,
             params={"key": _FIREBASE_API_KEY},
             json={"email": self.account, "password": password, "returnSecureToken": True},
+            headers={"Referer": "https://rec.us"},
         )
         if resp.status_code != 200:
             detail = resp.json().get("error", {}).get("message", resp.text)
@@ -150,6 +151,7 @@ class AuthClient(Client):
                     _FIREBASE_REFRESH_URL,
                     params={"key": _FIREBASE_API_KEY},
                     json={"grant_type": "refresh_token", "refresh_token": token.refresh_token},
+                    headers={"Referer": "https://rec.us"},
                 )
                 if resp.status_code != 200:
                     raise TokenRefreshError(self.account)

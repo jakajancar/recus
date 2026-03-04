@@ -1,0 +1,3975 @@
+openapi: 3.1.0
+info:
+  title: rec.us API
+  version: ""
+  description: |
+    API for rec.us, a parks & recreation booking platform.
+
+    Reverse engineered from the frontend app and public API responses.
+    Subject to change without notice.
+    Please submit pull requests for any additions or corrections to this documentation on [jakajancar/recus](https://github.com/jakajancar/recus).
+
+    ## Entity Model
+
+    - **Sport** — a sport or activity (e.g. Tennis, Pickleball, Yoga). Referenced by sites, instructors, and sections.
+    - **Region** — a geographic area (e.g. "San Francisco Area", "East Bay"). Used to discover locations across multiple organizations.
+    - **Organization** — a municipal parks & rec department (e.g. "San Francisco Rec & Park"). Configures which features are enabled.
+      - **Location** — a park or facility with bookable sites. Has address, hours, and a reservation window.
+        - **Site** — a bookable unit within a location (court, field, room, picnic table, etc.). Has pricing and allowed durations. Some are walk-up only. **Note:** The API uses "site" in paths but many response keys use the legacy name `courts`/`courtNumber`.
+      - **Instructor** — a coach who offers private lessons. Has sport-specific hourly rates and available time slots.
+      - **Section** — a group class or lesson pack. Has a facilitator, capacity, and multiple sessions.
+        - **Session** — an individual meeting within a section, with a specific date/time.
+    - **Facility Rental** — a site booking created via `POST /v1/facility-rentals`. Wraps a reservation and an order.
+      - **Reservation** — the time slot hold on a site.
+      - **Order** — the transactional record. Created with `pending` status and ~10 min expiration. Must be paid (even if $0) to finalize.
+        - **Payment** — settles an order. Has a method type (e.g. `free`, `cardOnline`) and amount in cents.
+
+    ## Pagination
+
+    Some list endpoints are **paginated** (default page size 25) — callers must iterate pages to get all results. Others return the full dataset in a single response.
+
+    ### Parameters
+
+    All paginated endpoints accept **either** of these equivalent param styles:
+
+    | Style | Params |
+    |---|---|
+    | Bracket (`qs`) | `pg[num]=1&pg[size]=25` |
+    | Flat | `page=1&pageSize=25` |
+
+    Both styles are interchangeable on every paginated endpoint. Page numbers are 1-indexed.
+
+    ### Response envelopes
+
+    The response shape is fixed per endpoint (does not depend on which param style you use). Two envelope styles exist:
+
+    **`data`/`meta` envelope**:
+
+    ```json
+    {
+      "data": [ ... ],
+      "meta": { "pg": { "num": 1, "size": 25, "totalResults": 49 } }
+    }
+    ```
+
+    More pages exist while `pg.num * pg.size < pg.totalResults`.
+
+    **`results`/`total` envelope**:
+
+    ```json
+    {
+      "results": [ ... ],
+      "total": 157
+    }
+    ```
+
+    More pages exist while `page * pageSize < total`. The response does not echo back the current page number.
+
+    ## Authentication
+
+    Authenticated endpoints (marked with a lock icon) require a Firebase Auth ID token passed as a Bearer token.
+
+    **Firebase project:** `rec-prod`
+    **Firebase Web API key:** `AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s`
+
+    ### Sign in with email/password
+
+    ```
+    POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s
+    ```
+
+    **Request body:**
+
+    ```json
+    {
+      "email": "user@example.com",
+      "password": "password",
+      "returnSecureToken": true
+    }
+    ```
+
+    **Response:**
+
+    ```json
+    {
+      "localId": "1N78WJBXjdU1avTCTx9z1JkFWMv1",
+      "email": "user@example.com",
+      "displayName": "",
+      "idToken": "eyJhbGciOi...",
+      "refreshToken": "AMf-vBx...",
+      "expiresIn": "3600"
+    }
+    ```
+
+    The `idToken` is used as the Bearer token for all authenticated API calls:
+
+    ```
+    Authorization: Bearer {idToken}
+    ```
+
+    Tokens expire after 1 hour. Use the `refreshToken` with the Firebase token refresh endpoint to obtain a new `idToken`.
+
+    ## Examples
+
+    ### Find Available Pickleball Sites
+
+    ```bash
+    # 1. List organizations
+    curl -s 'https://api.rec.us/v1/organizations' | jq '.data[].slug'
+
+    # 2. Get org detail to find location IDs (in config.banners.pages)
+    curl -s 'https://api.rec.us/v1/organizations/san-francisco-rec-park' | jq '.config.banners.pages | keys[]'
+
+    # 3. Get location detail
+    curl -s 'https://api.rec.us/v1/locations/ad9e28e1-2d02-4fb5-b31d-b75f63841814' | jq '.location.name, .location.courts[].courtNumber'
+
+    # 4. Check schedule for available slots
+    curl -s 'https://api.rec.us/v1/locations/ad9e28e1-2d02-4fb5-b31d-b75f63841814/schedule?startDate=2026-03-01' | \
+      jq '.dates["20260301"][] | select(.sports[].name == "Pickleball") | {court: .courtNumber, slots: [.schedule | to_entries[] | select(.value.referenceType == "RESERVABLE") | .key]}'
+    ```
+
+    ### Find Available Tennis Instructors
+
+    ```bash
+    # 1. List instructors with open lesson slots
+    curl -s 'https://api.rec.us/v1/instructors/cards/lessons?organizationSlug=san-francisco-rec-park' | \
+      jq '.[] | {name: .fullName, sport: .sports[0].name, rate: .sports[0].hourlyRate, nextLesson: .lessons[0].reservationTimestampRange}'
+
+    # 2. Get full instructor profile
+    curl -s 'https://api.rec.us/v1/instructors/{instructorId}' | jq '{name: .user.firstName + " " + .user.lastName, bio: .longBio, locations: [.instructorLocations[].locationId]}'
+    ```
+
+    ### Find Group Classes
+
+    ```bash
+    # List all programs for SF Rec Park in the next 90 days
+    curl -s 'https://api.rec.us/v1/discovery/programmed?organizationId=17380e28-7e02-4b52-82c5-fab18557fd7a&startDate=2026-02-27&endDate=2026-05-27' | \
+      jq '.[] | {name: .name, sport: .sportName, location: .locationName, spots: (.capacity - .participantCount), sessions: (.sessions | length)}'
+    ```
+
+    ### Book a Free Site (Full Flow)
+
+    End-to-end example booking a free pickleball site at Granada Park.
+
+    ```bash
+    # 1. Authenticate
+    TOKEN=$(curl -s -X POST \
+      'https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s' \
+      -H 'Content-Type: application/json' \
+      -d '{"email":"user@example.com","password":"password","returnSecureToken":true}' \
+      | jq -r '.idToken')
+
+    # 2. Find the location — search by region or org
+    #    Granada Park is in the San Francisco Area region
+    curl -s 'https://api.rec.us/v1/locations/availability?regionId=51cad8df-4985-4c09-ba5e-c7893f672c26' | \
+      jq '.[] | select(.location.name == "Granada Park") | .location | {id, name, courts: [.courts[] | {id, court: .courtNumber, pricing: .config.pricing.default}]}'
+
+    # 3. Check the schedule for available pickleball slots on a specific date
+    LOCATION_ID="38a201f0-4fb1-4991-8e72-db8a9495319e"
+    curl -s "https://api.rec.us/v1/locations/$LOCATION_ID/schedule?startDate=2026-03-05" | \
+      jq '.dates["20260305"][] | select(.sports[].name == "Pickleball") | {court: .courtNumber, slots: [.schedule | to_entries[] | select(.value.referenceType == "RESERVABLE") | .key]}'
+
+    # 4. Verify the site supports instant booking
+    SITE_ID="99b7129e-5ed4-4fd8-aba2-fee1683310bb"   # Site A (court)
+    curl -s "https://api.rec.us/v1/sites/$SITE_ID" \
+      -H "Authorization: Bearer $TOKEN" | \
+      jq '.data | {id, courtNumber, isInstantBookable, capacity}'
+
+    # 5. Create the reservation
+    ORDER_ID=$(curl -s -X POST 'https://api.rec.us/v1/facility-rentals' \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"data\": {
+          \"reservation\": {
+            \"timestampRange\": \"[2026-03-05 13:00:00, 2026-03-05 14:00:00)\",
+            \"locationId\": \"$LOCATION_ID\",
+            \"courtIds\": [\"$SITE_ID\"]
+          }
+        }
+      }" | jq -r '.data.order.id')
+
+    echo "Order created: $ORDER_ID"
+
+    # 6. Complete the order (required even for $0 reservations)
+    curl -s -X POST "https://api.rec.us/v1/orders/$ORDER_ID/pay" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"data":{"payments":[{"paymentMethodType":"free","amountCents":0}]}}' | \
+      jq '.data | {status, settledAt}'
+
+    # 7. Verify — the slot should now show as RESERVATION
+    curl -s "https://api.rec.us/v1/locations/$LOCATION_ID/schedule?startDate=2026-03-05" | \
+      jq '.dates["20260305"][] | select(.courtNumber == "A") | .schedule["13:00, 14:00"]'
+    # → { "referenceType": "RESERVATION", "referenceId": "..." }
+    ```
+
+    **Key points:**
+    - After `POST /v1/facility-rentals`, the order is `"pending"` with a ~10 minute expiration. You **must** call `POST /v1/orders/{orderId}/pay` to finalize it.
+    - For free sites, use `paymentMethodType: "free"` with `amountCents: 0`.
+    - The `timestampRange` uses PostgreSQL range syntax: `[start, end)` — inclusive start, exclusive end.
+    - Times in `timestampRange` are in the location's local timezone (e.g. `America/Los_Angeles`).
+
+    ### Book a Paid Site (Full Flow)
+
+    Same as the free site flow above, but diverges at step 4 — the site has a `fixed-slots` booking policy, and payment requires a Stripe confirmation step.
+
+    ```bash
+    # Steps 1-3 are the same as "Book a Free Site" (authenticate, find location, check schedule).
+
+    # 4. Get site detail — check booking policy and pricing
+    SITE_ID="040a5a1a-443a-4641-b079-ed7e650bd5ac"   # J.P. Murphy site "Court 3"
+    curl -s "https://api.rec.us/v1/sites/$SITE_ID" \
+      -H "Authorization: Bearer $TOKEN" | \
+      jq '.data | {id, courtNumber, isInstantBookable, noReservationText,
+        pricing: .config.pricing.default,
+        bookingPolicy: .config.bookingPolicies[0].type,
+        fixedSlots: [.config.bookingPolicies[0].slots[] | select(.dayOfWeek == 7) | {start: .startTimeLocal, end: .endTimeLocal}]}'
+    # → bookingPolicy: "fixed-slots", fixedSlots: [{start: "16:30:00", end: "18:00:00"}, ...]
+    # With fixed-slots, your timestampRange MUST match a slot exactly.
+
+    # 5. Create the reservation (timestampRange matches the fixed slot 16:30-18:00)
+    LOCATION_ID="7a8ef25a-dc20-4046-8aab-7212a9a41d20"
+    RESULT=$(curl -s -X POST 'https://api.rec.us/v1/facility-rentals' \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"data\": {
+          \"reservation\": {
+            \"timestampRange\": \"[2026-03-01 16:30:00, 2026-03-01 18:00:00)\",
+            \"locationId\": \"$LOCATION_ID\",
+            \"courtIds\": [\"$SITE_ID\"]
+          }
+        }
+      }")
+    ORDER_ID=$(echo "$RESULT" | jq -r '.data.order.id')
+    ITEM_ID=$(echo "$RESULT" | jq -r '.data.order.items[0].id')
+    TOTAL=$(echo "$RESULT" | jq -r '.data.order.total')
+    echo "Order: $ORDER_ID, Item: $ITEM_ID, Total: $TOTAL cents"
+    # → Total: 750 (= $7.50 for 1.5 hours at $5/hour)
+
+    # 6. Look up saved payment methods
+    USER_ID=$(echo "$RESULT" | jq -r '.data.order.customer.id')
+    ORG_ID=$(echo "$RESULT" | jq -r '.data.order.organization.id')
+    curl -s -X POST "https://api.rec.us/v1/users/$USER_ID/payment-method-setup" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"data\":{\"organizationId\":\"$ORG_ID\"}}" | \
+      jq '.data.paymentMethods[] | {id, brand: .card.brand, last4: .card.last4}'
+    # → { "id": "pm_1Sygm4CMyY4UUjhBOhNeoApv", "brand": "visa", "last4": "7510" }
+
+    # 7. Submit payment (use "ACH" type — "cardOnline" is rejected by the API)
+    PAY_RESULT=$(curl -s -X POST "https://api.rec.us/v1/orders/$ORDER_ID/pay" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"data\":{\"payments\":[{\"paymentMethodType\":\"ACH\",\"amountCents\":$TOTAL}]}}")
+
+    # Extract Stripe PaymentIntent details from the response
+    PI_ID=$(echo "$PAY_RESULT" | jq -r '.included.payments[0].gatewayData.paymentIntentId')
+    CLIENT_SECRET=$(echo "$PAY_RESULT" | jq -r '.included.payments[0].gatewayData.clientSecret')
+    echo "PaymentIntent: $PI_ID"
+
+    # 8. Confirm the PaymentIntent with Stripe using the saved card
+    PM_ID="pm_1Sygm4CMyY4UUjhBOhNeoApv"  # from step 6
+    STRIPE_PK="pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB"
+    curl -s -X POST "https://api.stripe.com/v1/payment_intents/$PI_ID/confirm" \
+      -u "$STRIPE_PK:" \
+      -d "payment_method=$PM_ID" \
+      -d "client_secret=$CLIENT_SECRET" | \
+      jq '{status, amount, currency}'
+    # → { "status": "succeeded", "amount": 750, "currency": "usd" }
+
+    # 9. Verify — order should show totalAmountRemaining: 0
+    curl -s "https://api.rec.us/v1/orders/$ORDER_ID" \
+      -H "Authorization: Bearer $TOKEN" | \
+      jq '.order | {status, total, totalAmountRemaining}'
+    ```
+
+    **Key differences from the free site flow:**
+    - **Fixed-slots sites** require `timestampRange` to exactly match a pre-defined slot boundary (check `config.bookingPolicies`). Using a custom duration like `[16:30, 17:30)` will fail with `"The reservation violates the site's booking policy"`.
+    - **Card payment** is a two-step process: (1) call `/pay` with `paymentMethodType: "ACH"` to create a Stripe PaymentIntent, then (2) confirm it via the Stripe API with a saved `payment_method` ID.
+    - The Stripe publishable key authenticates the `/confirm` call (passed as HTTP basic auth username with empty password).
+    - After Stripe confirmation, rec.us is notified via webhook and the order settles automatically.
+    - **Daily booking limits** exist per location/date (e.g. 1 reservation per day). Expired unpaid orders may still count against the limit temporarily. The error is `E_INELIGIBLE_SITE_BOOKING` with a message like `"Daily booking limit of 1 reached for March 1, 2026"`.
+
+    ## Guides
+
+    ### Availability & Schedule — Endpoint Comparison
+
+    Four endpoints return time slot / availability data. They overlap significantly but each has unique fields.
+
+    | | `GET /v1/locations/{id}` | `GET /v1/locations/availability` | `GET /v1/sites/{id}/availability` | `GET /v1/locations/{id}/schedule` |
+    |---|---|---|---|---|
+    | **Intent** | "What can I book here?" — single location with bookable start times per site | "Where can I play?" — cross-location discovery of bookable start times | "How long can I book?" — per-slot duration options for a specific site | "What does the day look like?" — full slot grid with bookings, open hours, and reservable slots |
+    | **Frontend usage** | Location detail page (`/locations/[id]`) — site metadata + inline booking flow. Uses `publishedSites=true`. | Location search/map page (`/locations`) | `/sites/[siteId]` page — facility rentals only (non-court types). Reached via org's Facility Rentals tab → `GET /v1/sites?organizationId={id}`. Court booking never calls this endpoint. | Location detail page (`/locations/[id]`) — visual schedule grid |
+    | **Scope** | Single location, all sites | Multi-location (filter by org, region, or lat/lng) | Single site | Single location, all sites |
+    | Site ID (UUID) | Yes, per site (in `courts[].id`) | Yes, per site (in `courts[].id`) | N/A (you provide it) | Only indirectly, via `reservations[].courts[]` (booked slots only; key name is misleading) |
+    | Available start times | Yes (`courts[].availableSlots`) | Yes (`courts[].availableSlots`) | Yes (keys of `data[date]`) | No (has RESERVABLE ranges, not individual start times) |
+    | Sport names | No (only `sportId`) | No (only `sportId`) | No | Yes (`sports[].name`) |
+    | All slot states | No — available start times only | No — available start times only | No — available start times only | Yes — RESERVABLE, RESERVATION, OPEN |
+    | Who booked each slot | No | No | No | Yes — `users` dict with names, skill levels |
+    | Per-slot available durations | No (can be computed client-side — see below) | No (can be computed client-side — see below) | Yes (`availableDurationsMinutes` per time) | No |
+    | Booking policies | Yes (`courts[].config.bookingPolicies`) | Yes (`courts[].config.bookingPolicies`) | No | No |
+    | `allowedReservationDurations` | Yes, per site | Yes, per site | No | No |
+    | Pricing | Yes, per site (`config.pricing`) | Yes, per site (`config.pricing`) | No | Only on booked reservations (`reservationCost`) |
+    | `isInstantBookable` | Yes, per site | Yes, per site | No | No |
+    | Detailed location info (e.g. `playGuidelines`) | Yes | No | No | No |
+    | Multi-location | No | Yes | No | No |
+    | Date range | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) | Automatic (reservation window, typically 7 days) | Explicit `startDate`/`endDate` params |
+
+    #### Computing per-slot durations client-side
+
+    `GET /v1/sites/{id}/availability` returns `availableDurationsMinutes` per time slot, but requires one request per site — impractical for multi-site views. Both `GET /v1/locations/{id}` and `GET /v1/locations/availability` return enough data to compute equivalent durations client-side (this is what the rec.us frontend does for court reservations on the location detail page).
+
+    Each site (in `courts[]`) provides three relevant fields:
+    - `availableSlots` — bookable start times as `"YYYY-MM-DD HH:MM:SS"` strings
+    - `allowedReservationDurations.minutes` — e.g. `[30, 60, 90]`
+    - `config.bookingPolicies[]` — optional; when present with `type: "fixed-slots"` and `isActive: true`, the site uses pre-defined time blocks
+
+    **Fixed-slot sites** (active `bookingPolicies` with `type: "fixed-slots"`):
+
+    The `bookingPolicies[].slots` array defines the valid time blocks per day of week (`dayOfWeek` 1=Mon…7=Sun). Each slot has `startTimeLocal` and `endTimeLocal`. For each block whose `startTimeLocal` (truncated to `HH:MM`) appears in `availableSlots` on a matching day-of-week, the only available duration is `endTimeLocal - startTimeLocal`. The `allowedReservationDurations` field is ignored — it contains a stale superset.
+
+    Note: `availableSlots` for fixed-slot sites includes every 30-minute tick within the open range (e.g. `07:30`, `08:00`, `08:30` for a 07:30–09:00 block), but only the block start times are valid booking starts.
+
+    **Flexible-booking sites** (no active `bookingPolicies`, or `isActive: false`):
+
+    For each start time in `availableSlots`, check which durations from `allowedReservationDurations.minutes` are feasible by verifying that all consecutive 30-minute sub-slots exist:
+
+    ```
+    for each duration in allowedReservationDurations.minutes (ascending):
+        feasible = true
+        for offset in 0, 30, 60, ... (duration - 30):
+            if (startTime + offset) not in availableSlots for that date:
+                feasible = false; break
+        if feasible: include duration
+    ```
+
+    For example, with `allowedReservationDurations: [30, 60, 90]` and `availableSlots` containing `17:00, 17:30, 18:00` but not `18:30`:
+    - At 17:00: `[30, 60, 90]` (17:00, 17:30, 18:00 all present)
+    - At 17:30: `[30, 60]` (17:30, 18:00 present; 18:30 missing)
+    - At 18:00: `[30]` (18:00 present; 18:30 missing)
+
+    This computation produces results identical to `GET /v1/sites/{id}/availability`.
+
+servers:
+  - url: https://api.rec.us
+    description: Production
+
+tags:
+  - name: Sports
+    description: Sport and activity types
+  - name: Regions
+    description: Geographic regions
+  - name: Organizations
+    description: Municipal parks & rec departments
+  - name: Locations
+    description: Parks and facilities with bookable sites
+  - name: Instructors
+    description: Private lesson instructors
+  - name: Discovery
+    description: Program and group class discovery
+  - name: Sites
+    description: Bookable units (courts, fields, rooms, picnic tables, etc.)
+  - name: Users
+    description: User profiles and account management
+  - name: Facility Rentals
+    description: Site reservation creation
+  - name: Orders
+    description: Order management and checkout
+  - name: Bookings
+    description: Booking management and cancellation
+  - name: Payments
+    description: Payment details and cancellation
+
+security: []
+
+paths:
+  # ── Sports ──────────────────────────────────────────────
+  /v1/sports:
+    get:
+      operationId: listSports
+      tags: [Sports]
+      summary: List all sports
+      description: |
+        Returns all sports/activities on the platform.
+
+        **Notes:**
+        - Sport IDs are stable and referenced by `courts[].sports[].sportId` in location/availability responses (note: the `courts` key contains all site types, not just courts) and `sports[].id` in schedule responses.
+        - Includes non-court activities (e.g. Guitar, Yoga, Day Camp) used by the programs/sections system.
+      responses:
+        '200':
+          description: List of all sports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Sport'
+              example:
+                - id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+                  name: Pickleball
+                  description: A fun sport for all ages
+                - id: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                  name: Tennis
+                  description: null
+
+  # ── Regions ─────────────────────────────────────────────
+  /v1/regions:
+    get:
+      operationId: listRegions
+      tags: [Regions]
+      summary: List all regions
+      description: Returns all geographic regions.
+      responses:
+        '200':
+          description: List of all regions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Region'
+              example:
+                - id: 51cad8df-4985-4c09-ba5e-c7893f672c26
+                  name: "SF & Peninsula"
+                  lat: "37.727239"
+                  lng: "-122.400876"
+                  radius: 50
+                - id: a9edb21b-0bc1-4eb2-802d-4f82d80f2bba
+                  name: East Bay
+                  lat: "37.883765"
+                  lng: "-121.995492"
+                  radius: 50
+
+  # ── Organizations ───────────────────────────────────────
+  /v1/organizations:
+    get:
+      operationId: listOrganizations
+      tags: [Organizations]
+      summary: List all organizations
+      description: |
+        Returns all organizations on the platform. **Paginated** (`data`/`meta` envelope — see Pagination).
+      parameters:
+        - $ref: '#/components/parameters/PaginationBracketNum'
+        - $ref: '#/components/parameters/PaginationBracketSize'
+        - $ref: '#/components/parameters/PaginationFlatPage'
+        - $ref: '#/components/parameters/PaginationFlatPageSize'
+      responses:
+        '200':
+          description: Paginated list of organizations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrganizationSummary'
+                  meta:
+                    $ref: '#/components/schemas/DataMetaPagination'
+              example:
+                data:
+                  - id: 17380e28-7e02-4b52-82c5-fab18557fd7a
+                    slug: san-francisco-rec-park
+                    name: San Francisco Rec & Park
+                    displayName: San Francisco Rec & Park
+                    logo: "https://prod-rec-tech-img-bucket-8656aa2.s3.us-west-1.amazonaws.com/..."
+                    fullLogo: "https://..."
+                    config:
+                      general:
+                        primaryState: California
+                        primaryTimezone: America/Los_Angeles
+                meta:
+                  pg:
+                    num: 1
+                    size: 25
+                    totalResults: 49
+
+  /v1/organizations/{organizationSlugOrId}:
+    get:
+      operationId: getOrganization
+      tags: [Organizations]
+      summary: Get organization detail
+      description: |
+        Returns full organization detail including configuration.
+
+        **`config.tabs`** controls which features are enabled for the organization. A tab with `"enabled": false` is disabled. Possible tabs:
+        - `locations` — court reservations (renamed per org, e.g. "Court Reservations", "Sport Facility Rentals")
+        - `coaching` — private lessons with instructors
+        - `programs` — group classes / lesson packs
+        - `facilityRentals` — picnic/event space rentals
+        - `membershipsAndPasses` — membership programs
+      parameters:
+        - $ref: '#/components/parameters/OrganizationSlugOrId'
+      responses:
+        '200':
+          description: Organization detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationDetail'
+              example:
+                id: 17380e28-7e02-4b52-82c5-fab18557fd7a
+                slug: san-francisco-rec-park
+                name: San Francisco Rec & Park
+                description: Official SF organization
+                logo: "https://..."
+                fullLogo: "https://..."
+                config:
+                  tabs:
+                    coaching:
+                      order: 2
+                    programs:
+                      name: Lesson Packs
+                      order: 3
+                    locations:
+                      name: Court Reservations
+                      order: 1
+                    facilityRentals:
+                      enabled: false
+                    membershipsAndPasses:
+                      enabled: false
+                  banners:
+                    pages:
+                      "/locations/{locationId}": "Banner text (markdown)..."
+                  general:
+                    primaryState: California
+                    primaryTimezone: America/Los_Angeles
+                  lessons:
+                    restrictions:
+                      allowedDurations:
+                        minutes: [30, 60, 90]
+                      maxWeeklyBookings: 15
+                activityOrCategoryOrder: []
+
+  /v1/organizations/{organizationId}/groups:
+    get:
+      operationId: listOrganizationGroups
+      tags: [Organizations]
+      summary: List organization membership groups
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrganizationId'
+      responses:
+        '200':
+          description: Organization membership groups
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Locations ───────────────────────────────────────────
+  /v1/locations/{locationId}:
+    get:
+      operationId: getLocation
+      tags: [Locations]
+      summary: Get location detail
+      description: |
+        Returns location detail with all sites.
+
+        **Note:** The response nests sites under a `courts` key, but this array contains **all** site types (courts, fields, rooms, picnic tables, etc.), not just courts. Similarly, `courtNumber` is the display name for any site type (e.g. `"Court 1"`, `"Picnic Table A"`, `"Room 201"`).
+
+        **Key fields on each site in `courts[]`:**
+        - `courts[].courtNumber` — the display name for any site, despite the field name.
+        - `courts[].noReservationText` — if set (e.g. `"Not Reservable"`), the site is walk-up only.
+        - `courts[].availableSlots` — bookable start times as `"YYYY-MM-DD HH:MM:SS"` strings in the location's timezone. Covers the upcoming reservation window.
+        - `courts[].allowedReservationDurations` — the set of durations this site supports.
+        - `courts[].config.bookingPolicies` — optional. When present with `type: "fixed-slots"` and `isActive: true`, the site uses pre-defined time blocks. See "Computing per-slot durations client-side" in the API description.
+        - `courts[].isInstantBookable` — whether the site can be booked directly.
+        - `courts[].sports[].sportId` — references a global sport. The sport **name** is not included here; it appears in the schedule endpoint.
+        - `defaultReservationWindow` — how many days in advance reservations open (e.g. 7 = one week ahead).
+        - `reservationReleaseTimeLocal` — the local time when new reservation slots become available (e.g. `"08:00:00"` = 8 AM).
+        - `playGuidelines` — detailed markdown with reservation rules, site assignments, hours, etc.
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+        - name: publishedSites
+          in: query
+          schema:
+            type: string
+            enum: ["true"]
+          description: Set to "true" to filter to only published (bookable) sites. Without this, all sites are returned including unpublished/inactive ones.
+      responses:
+        '200':
+          description: Location detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  location:
+                    $ref: '#/components/schemas/LocationDetail'
+              example:
+                location:
+                  id: 95745483-6b38-4e99-8ba2-a3e23cda8587
+                  name: Dolores
+                  description: TBD
+                  formattedAddress: "3753 18th St, San Francisco, CA 94114, USA"
+                  lat: "37.76100510000001"
+                  lng: "-122.4271707"
+                  placeId: ChIJ_c7oyBl-j4ARczOfJmf4QzU
+                  hoursOfOperation: "7:00am to 9:00pm"
+                  timezone: America/Los_Angeles
+                  playGuidelines: "Markdown string with reservation policy, court info, etc."
+                  accessInfo: "Courts are unlocked..."
+                  gettingThereInfo: "The courts are located along the north side..."
+                  defaultReservationWindow: 7
+                  reservationReleaseTimeLocal: "08:00:00"
+                  reservationBuffer: 0
+                  privateLessonReservationWindow: 0
+                  organizationId: 17380e28-7e02-4b52-82c5-fab18557fd7a
+                  images:
+                    detail: "https://..."
+                    thumbnail: "https://..."
+                    mainGallery: "https://..."
+                    smallGallery1: "https://..."
+                    smallGallery2: "https://..."
+                  organization:
+                    id: 17380e28-7e02-4b52-82c5-fab18557fd7a
+                    name: San Francisco Rec & Park
+                    slug: san-francisco-rec-park
+                  courts:
+                    - id: 8ad0975e-9498-4bca-8832-26368ca54de7
+                      courtNumber: Court 1
+                      maxReservationTime: "01:30:00"
+                      noReservationText: null
+                      allowPrivateLessons: false
+                      type: court
+                      capacity: null
+                      description: null
+                      bufferMinutesBetweenReservations: 0
+                      allowedReservationDurations:
+                        minutes: [30, 60, 90]
+                      config:
+                        pricing:
+                          default:
+                            type: perHour
+                            cents: 500
+                      sports:
+                        - id: 65751cfa-31f5-4e0f-a5db-5bc2079f4ac0
+                          courtId: 8ad0975e-9498-4bca-8832-26368ca54de7
+                          sportId: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                          price: 0
+                          currency: USD
+                      images:
+                        map: []
+                        mainGallery: []
+                      amenities:
+                        amenityTagIds: []
+                  tags: []
+                  regions: []
+
+  # ── Schedule ────────────────────────────────────────────
+  /v1/locations/{locationId}/schedule:
+    get:
+      operationId: getLocationSchedule
+      tags: [Locations]
+      summary: Get schedule
+      description: |
+        Returns the schedule for **all sites** at a location for the given date range.
+
+        **Schedule slot keys** are formatted as `"HH:MM, HH:MM"` (start time, end time in 24h local time).
+
+        **`referenceType` values:**
+
+        | Value | Meaning |
+        |---|---|
+        | `RESERVABLE` | Open slot — can be booked |
+        | `RESERVATION` | Already booked — `referenceId` links to the `reservations` dict |
+        | `OPEN` | Not reservable — `referenceLabel` explains why (e.g. "Not Reservable" for walk-up courts or outside bookable hours) |
+
+        **`reservations` dict:** Keyed by reservation UUID. Contains cost (in cents), who booked it (`users[]`), which site (`courts[]` — key name is misleading), and whether it's a regular reservation, lesson, or class.
+
+        **`users` dict:** Keyed by user UUID. Only shows first initial and last initial for privacy. Includes `skillLevel` (e.g. "first-timer", "beginner", "intermediate", "advanced").
+
+        **`instructors`, `classes`, `sessions`, `facilityRentals` dicts:** Populated when the schedule includes instructor lessons, group classes, or facility rentals. Empty for pure reservation schedules.
+
+        **Note:** The schedule response uses `courtNumber` as the display name for each site entry, even for non-court site types. There is no site UUID in the schedule's per-site entries — only `courtNumber` and `sports`. Site UUIDs appear only in `reservations[].courts[]` for booked slots.
+      parameters:
+        - $ref: '#/components/parameters/LocationId'
+        - name: startDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Start date (YYYY-MM-DD).
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date (YYYY-MM-DD). Defaults to same as startDate.
+      responses:
+        '200':
+          description: Schedule data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScheduleResponse'
+              example:
+                dates:
+                  "20260301":
+                    - courtNumber: Court 1
+                      sports:
+                        - id: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                          name: Tennis
+                      schedule:
+                        "07:00, 07:30":
+                          referenceType: OPEN
+                          referenceLabel: Not Reservable
+                        "07:30, 09:00":
+                          referenceType: RESERVATION
+                          referenceId: bc5ddf13-26bb-4fec-9077-a3d47995b652
+                        "12:00, 13:30":
+                          referenceType: RESERVABLE
+                        "21:00, 22:00":
+                          referenceType: OPEN
+                          referenceLabel: Not Reservable
+                reservations:
+                  bc5ddf13-26bb-4fec-9077-a3d47995b652:
+                    id: bc5ddf13-26bb-4fec-9077-a3d47995b652
+                    reservationType: court-reservation
+                    reservationCost: 750
+                    reservationCostCurrency: USD
+                    guestPrice: 750
+                    capacity: 1
+                    paid: true
+                    visibility: public
+                    doNotMarket: false
+                    groupsOnly: null
+                    classId: null
+                    sessionId: null
+                    instructorId: null
+                    facilityRentalId: some-uuid
+                    linkedReservationId: some-uuid
+                    locationId: 95745483-6b38-4e99-8ba2-a3e23cda8587
+                    users: [user-uuid]
+                    courts: [court-uuid]
+                users:
+                  user-uuid:
+                    id: user-uuid
+                    firstName: K
+                    lastName: N
+                    image: null
+                    skillLevel: first-timer
+                    primarySportId: null
+                instructors: {}
+                classes: {}
+                sessions: {}
+                facilityRentals: {}
+
+  /v1/locations/availability:
+    get:
+      operationId: listLocationAvailability
+      tags: [Locations]
+      summary: Get available slots across locations
+      description: |
+        Multi-location equivalent of `GET /v1/locations/{locationId}` — returns the same `courts[].availableSlots` structure but across many locations at once. Also the only way to list locations for a specific organization (the single-location endpoint does not support org filtering).
+
+        Response is a subset of the location detail endpoint — same `courts[]` structure (see its docs for field descriptions) but without `playGuidelines`, `organization`, `regions`, `schedule`, and a few other location/court fields.
+
+        - `distance` — populated when filtering by lat/lng, otherwise null.
+        - Only locations with at least one site are returned. Locations with zero available slots are still included (check `availableSlots` length).
+      parameters:
+        - name: regionId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: UUID of a region. At least one of regionId, organizationSlug, or latitude/longitude is required.
+        - name: organizationSlug
+          in: query
+          schema:
+            type: string
+          description: Organization slug (e.g. `san-francisco-rec-park`).
+        - name: latitude
+          in: query
+          schema:
+            type: number
+          description: Latitude for geo filter.
+        - name: longitude
+          in: query
+          schema:
+            type: number
+          description: Longitude for geo filter.
+        - name: publishedSites
+          in: query
+          schema:
+            type: string
+            enum: ["true"]
+          description: Set to "true" to filter to only published (bookable) sites. Without this, all sites are returned including unpublished/inactive ones.
+      responses:
+        '200':
+          description: List of locations with availability
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AvailabilityLocationWrapper'
+              example:
+                - distance: null
+                  location:
+                    id: 81cd2b08-8ea6-40ee-8c89-aeba92506576
+                    name: Alice Marble
+                    formattedAddress: "1200 Greenwich St, San Francisco, CA 94109, USA"
+                    lat: "37.7977"
+                    lng: "-122.4179"
+                    hoursOfOperation: "7:00am to 7:30pm"
+                    timezone: America/Los_Angeles
+                    organizationId: 17380e28-7e02-4b52-82c5-fab18557fd7a
+                    defaultReservationWindow: 7
+                    reservationReleaseTimeLocal: "08:00:00"
+                    playGuidelines: "..."
+                    images:
+                      thumbnail: "https://..."
+                    courts:
+                      - id: court-uuid
+                        courtNumber: Court 1
+                        maxReservationTime: "01:30:00"
+                        type: court
+                        sports:
+                          - id: some-uuid
+                            sportId: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                        config:
+                          pricing:
+                            default:
+                              type: perHour
+                              cents: 500
+                        allowedReservationDurations:
+                          minutes: [30, 60, 90]
+                        availableSlots:
+                          - "2026-03-02 07:30:00"
+                          - "2026-03-02 08:00:00"
+                          - "2026-03-02 08:30:00"
+                          - "2026-03-02 09:00:00"
+                        slots:
+                          - type: PRIVATE
+                            openFrom: "07:30:00"
+                            openTo: "19:30:00"
+                            dayOfWeek: 1
+
+  # ── Instructors ─────────────────────────────────────────
+  /v1/instructors/cards/lessons:
+    get:
+      operationId: listInstructorCards
+      tags: [Instructors]
+      summary: List instructors with available lessons
+      description: |
+        Returns instructors with their upcoming available lesson time slots.
+
+        **`lessons[]`** — upcoming available time slots for booking a private lesson with this instructor. Each has a time range, sport, and location.
+      parameters:
+        - name: organizationSlug
+          in: query
+          schema:
+            type: string
+          description: Filter by organization. At least one of organizationSlug or locationId is required.
+        - name: locationId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by location.
+        - name: regionId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by region.
+        - name: latitude
+          in: query
+          schema:
+            type: number
+          description: Latitude for geo filter.
+        - name: longitude
+          in: query
+          schema:
+            type: number
+          description: Longitude for geo filter.
+      responses:
+        '200':
+          description: List of instructors with lessons
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InstructorCard'
+              example:
+                - id: 415856ca-7fe0-4473-aa7e-5ea145bd871c
+                  firstName: Marie
+                  lastName: Laurent
+                  fullName: Marie Laurent
+                  shortDescription: "Usually available: Weekdays 10:30AM-6PM, Saturdays 10:30AM-6PM"
+                  profileImage: "https://..."
+                  tags: []
+                  config:
+                    offersLessonPacks: true
+                    doNotMarketForLessons: false
+                  sports:
+                    - id: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                      name: Tennis
+                      hourlyRate: 98
+                  certifications: []
+                  lessons:
+                    - id: 9efc7f51-2c27-47f5-b622-6fcdcb20c89c
+                      reservationTimestampRange:
+                        from:
+                          date: "2026-03-02"
+                          time: "13:00:00"
+                        to:
+                          date: "2026-03-02"
+                          time: "14:00:00"
+                        inclusive:
+                          lower: true
+                          upper: false
+                      classId: null
+                      classRecommendedLevel: null
+                      className: null
+                      sport:
+                        id: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                        name: Tennis
+                      location:
+                        id: 3552b6f7-e7bd-4334-9e4a-731b015447e0
+                        name: Helen Wills
+
+  /v1/instructors/{instructorId}:
+    get:
+      operationId: getInstructor
+      tags: [Instructors]
+      summary: Get instructor detail
+      description: |
+        Returns full instructor profile.
+
+        **`instructorLocations[]`** — which locations this instructor teaches at, with per-location hourly rates (may differ from the base rate in `sports[]`).
+      parameters:
+        - $ref: '#/components/parameters/InstructorId'
+      responses:
+        '200':
+          description: Instructor detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstructorDetail'
+              example:
+                id: 415856ca-7fe0-4473-aa7e-5ea145bd871c
+                userId: 5312b05a-230b-4d74-a30e-aa3f5f62f8cc
+                shortDescription: "Usually available: Weekdays 10:30AM-6PM..."
+                longBio: "Markdown string with full bio, availability, pricing..."
+                canTeachPrivateLessons: true
+                isPro: false
+                tags: []
+                certifications: []
+                images:
+                  instructorAvatar80x80: "https://..."
+                  instructor152x89: "https://..."
+                  instructor152x240: "https://..."
+                  instructor240x140: "https://..."
+                config:
+                  doNotMarketForLessons: false
+                user:
+                  id: 5312b05a-230b-4d74-a30e-aa3f5f62f8cc
+                  firstName: Marie
+                  lastName: Laurent
+                sports:
+                  - id: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                    name: Tennis
+                    hourlyRate: 98
+                instructorLocations:
+                  - id: bcea8747-0000-0000-0000-000000000000
+                    instructorId: 415856ca-7fe0-4473-aa7e-5ea145bd871c
+                    locationId: 16fdf80f-0000-0000-0000-000000000000
+                    hourlyRate: 89
+                    sportId: bd745b6e-1dd6-43e2-a69f-06f094808a96
+
+  # ── Discovery / Programmed Sections ─────────────────────
+  /v1/discovery/programmed:
+    get:
+      operationId: listProgrammedSections
+      tags: [Discovery]
+      summary: List available programs and group classes
+      description: |
+        Returns available programs and group classes for a given organization, location, or region within a date range.
+
+        **Notes:**
+        - `capacity` — max participants. `participantCount` — currently enrolled. Available spots = `capacity - participantCount`.
+        - `sessions[]` — individual meeting dates/times. Timestamps are in the section's timezone.
+        - `recommendedLevel` — skill level (e.g. "all", "beginner", "intermediate", "advanced").
+        - Types of sections include lesson packs (1:1, capacity=1), small group lessons (capacity=4), and other programs.
+      parameters:
+        - name: organizationId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Organization UUID. At least one of organizationId, locationId, regionId, or instructorId is required.
+        - name: locationId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Location UUID.
+        - name: regionId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Region UUID.
+        - name: instructorId
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Instructor UUID.
+        - name: sportIds
+          in: query
+          schema:
+            type: string
+          description: Filter by sport ID.
+        - name: startDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Start date (YYYY-MM-DD).
+        - name: endDate
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: End date (YYYY-MM-DD).
+      responses:
+        '200':
+          description: List of programs/sections
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DiscoverySection'
+              example:
+                - id: 850b8843-f2e5-40ea-a709-4c3e98a9af5c
+                  name: Pickleball Small Group Lessons - Adults
+                  timezone: America/Los_Angeles
+                  recommendedLevel: all
+                  sportId: bd745b6e-1dd6-43e2-a69f-06f094808a96
+                  sportName: Pickleball
+                  locationName: Rossi
+                  capacity: 4
+                  participantCount: 0
+                  facilitators:
+                    - id: instructor-uuid
+                      firstName: Jane
+                      lastName: Doe
+                      imageUrl: "https://..."
+                  sessions:
+                    - timestampRange: ["2026-03-01 12:00:00", "2026-03-01 13:00:00"]
+                    - timestampRange: ["2026-03-08 12:00:00", "2026-03-08 13:00:00"]
+                    - timestampRange: ["2026-03-15 12:00:00", "2026-03-15 13:00:00"]
+                    - timestampRange: ["2026-03-22 12:00:00", "2026-03-22 13:00:00"]
+
+  # ── Sites ───────────────────────────────────────────────
+  /v1/sites:
+    get:
+      operationId: listSites
+      tags: [Sites]
+      summary: List sites for an organization
+      description: |
+        Returns facility-rental sites for a given organization. **Paginated** (`results`/`total` envelope — see Pagination).
+
+        **Only returns non-court site types** (picnic tables, bounce houses, gyms, outdoor event spaces, etc.). Courts, fields, and rinks are **not** included — those are accessed exclusively through the location endpoints (`GET /v1/locations/{id}` and `GET /v1/locations/availability`). Organizations that only have courts (e.g. `san-francisco-rec-park`) return `total: 0`.
+
+        Response items have the same shape as `GET /v1/sites/{siteId}` `.data`.
+      parameters:
+        - name: organizationId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Organization UUID.
+        - $ref: '#/components/parameters/PaginationBracketNum'
+        - $ref: '#/components/parameters/PaginationBracketSize'
+        - $ref: '#/components/parameters/PaginationFlatPage'
+        - $ref: '#/components/parameters/PaginationFlatPageSize'
+      responses:
+        '200':
+          description: Paginated list of sites
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SiteDetail'
+                  total:
+                    type: integer
+
+  /v1/sites/{siteId}:
+    get:
+      operationId: getSite
+      tags: [Sites]
+      summary: Get site detail
+      description: |
+        Returns detailed information about a specific site, including whether it supports instant booking.
+
+        **Notes:**
+        - `courtNumber` — the display name (e.g. `"A"`, `"Court 1"`, `"Picnic Table 3"`), despite the field name.
+        - `capacity` — 0 means no cap on attendees.
+        - `isInstantBookable` — if `true`, the site can be booked directly via the facility-rentals endpoint. If `false`, the site may require a request/approval flow.
+        - `noReservationText` — if set (e.g. `"Not Reservable"`), the site is walk-up only.
+        - `config.bookingPolicies[]` — optional. When present with `type: "fixed-slots"`, the site uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with `"The reservation violates the site's booking policy"`. `dayOfWeek` uses 1=Monday through 7=Sunday. If no `bookingPolicies` are present, the site uses flexible booking with `allowedReservationDurations`.
+      parameters:
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Site detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SiteDetail'
+              example:
+                data:
+                  id: 99b7129e-5ed4-4fd8-aba2-fee1683310bb
+                  courtNumber: A
+                  capacity: 0
+                  isInstantBookable: true
+                  noReservationText: null
+                  locationId: 38a201f0-4fb1-4991-8e72-db8a9495319e
+                  locationName: Granada Park
+                  config:
+                    pricing:
+                      default:
+                        type: perHour
+                        cents: 0
+                    deposits: {}
+                    bookingPolicies:
+                      - type: fixed-slots
+                        isActive: true
+                        slots:
+                          - dayOfWeek: 1
+                            startTimeLocal: "07:30:00"
+                            endTimeLocal: "09:00:00"
+                          - dayOfWeek: 1
+                            startTimeLocal: "09:00:00"
+                            endTimeLocal: "10:30:00"
+                  allowedReservationDurations:
+                    minutes: [30, 60, 90, 120]
+                  maxReservationTime: "02:00:00"
+                  images:
+                    map: []
+                    mainGallery: []
+                  descriptionMd: null
+                  rulesMd: null
+
+  /v1/sites/{siteId}/availability:
+    get:
+      operationId: getSiteAvailability
+      tags: [Sites]
+      summary: Get site availability
+      description: |
+        Returns available dates and time slots for a specific site.
+
+        **Notes:**
+        - Keys are dates (`YYYY-MM-DD`), values are objects keyed by start time (`HH:MM:SS`).
+        - Each time slot lists which durations (in minutes) are available starting at that time.
+        - This endpoint is used by the frontend to populate the time and duration pickers.
+      parameters:
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Site availability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      additionalProperties:
+                        $ref: '#/components/schemas/SlotAvailability'
+                      description: Keyed by start time (HH:MM:SS).
+                    description: Keyed by date (YYYY-MM-DD).
+              example:
+                data:
+                  "2026-03-05":
+                    "08:00:00":
+                      availableDurationsMinutes: [30, 60, 90, 120]
+                    "08:30:00":
+                      availableDurationsMinutes: [30, 60, 90]
+                    "13:00:00":
+                      availableDurationsMinutes: [30, 60, 90, 120]
+                    "13:30:00":
+                      availableDurationsMinutes: [30, 60, 90]
+
+  /v1/sites/{siteId}/instant-booking-configuration:
+    get:
+      operationId: getSiteInstantBookingConfig
+      tags: [Sites]
+      summary: Get site instant booking configuration
+      description: Returns the instant booking configuration for a site, if one exists. Returns 404 if not configured.
+      parameters:
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Instant booking configuration
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/sites/{siteId}/addons:
+    get:
+      operationId: listSiteAddons
+      tags: [Sites]
+      summary: Get site add-ons
+      description: Returns add-ons available when booking a specific site.
+      parameters:
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Site add-ons
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+
+  # ── Users ───────────────────────────────────────────────
+  /v1/users/me:
+    get:
+      operationId: getCurrentUser
+      tags: [Users]
+      summary: Get current user profile
+      description: |
+        Returns the authenticated user's profile. The `id` field is the rec.us user UUID (not the Firebase UID).
+
+        **Notes:**
+        - The `id` (rec.us UUID) is needed for user-scoped endpoints like `/v1/users/{userId}/bookings`. This is **not** the same as `firebaseUserId`.
+      security:
+        - firebaseAuth: []
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfile'
+              example:
+                id: 9101112a-3912-4cda-8814-8cd29586bd0f
+                householdId: 7a8da9f0-93ce-4578-bfc8-61cc36fbfbf0
+                firebaseUserId: 1N78WJBXjdU1avTCTx9z1JkFWMv1
+                recId: EID223
+                email: user@example.com
+                role: user
+                firstName: John
+                lastName: Doe
+                phone: "2234445555"
+                formattedAddress: "455 Vallejo St., San Francisco, CA 94133, USA"
+                skillLevel: first-timer
+                isInstructor: false
+                memberships: []
+                organizationRoles: {}
+                profile:
+                  id: profile-uuid
+                  userId: 9101112a-3912-4cda-8814-8cd29586bd0f
+                  dateOfBirth: null
+                  gender: null
+                  email: user@example.com
+                  phone: "2234445555"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/users/{userId}/groups:
+    get:
+      operationId: listUserGroups
+      tags: [Users]
+      summary: Get user's group memberships
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Group memberships
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/users/{userId}/claimables/check:
+    get:
+      operationId: checkUserClaimables
+      tags: [Users]
+      summary: Check claimable items
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Claimable items
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/users/signup/validate:
+    post:
+      operationId: validateSignup
+      tags: [Users]
+      summary: Validate signup data
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/users/send-verification:
+    post:
+      operationId: sendVerification
+      tags: [Users]
+      summary: Send verification code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Verification sent
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /v1/users/{userId}/payment-method-setup:
+    post:
+      operationId: setupPaymentMethod
+      tags: [Users]
+      summary: Get Stripe setup intent and saved cards
+      description: |
+        Returns a Stripe SetupIntent and the user's saved payment methods for a given organization. This is how you discover saved card IDs (`pm_...`) needed for the card payment flow.
+
+        **Notes:**
+        - `paymentMethods[].id` — the Stripe PaymentMethod ID (e.g. `pm_...`). Used when confirming a PaymentIntent via the Stripe API.
+        - `setupIntentId` / `clientSecret` — a Stripe SetupIntent for adding new payment methods (not needed for paying with an existing saved card).
+        - `organizationId` is required because payment methods are scoped per Stripe Connect account (each organization has its own).
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: object
+                  required: [organizationId]
+                  properties:
+                    organizationId:
+                      type: string
+                      format: uuid
+            example:
+              data:
+                organizationId: 17380e28-7e02-4b52-82c5-fab18557fd7a
+      responses:
+        '200':
+          description: Stripe setup intent and saved payment methods
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/PaymentMethodSetupData'
+              example:
+                data:
+                  provider: stripe
+                  setupIntentId: seti_1T5tqjCMyY4UUjhB8p5JyVDt
+                  clientSecret: "seti_1T5tqjCMyY4UUjhB..._secret_..."
+                  paymentMethods:
+                    - id: pm_1Sygm4CMyY4UUjhBOhNeoApv
+                      card:
+                        brand: visa
+                        exp_month: 1
+                        exp_year: 2031
+                        last4: "7510"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Facility Rentals ────────────────────────────────────
+  /v1/facility-rentals:
+    post:
+      operationId: createFacilityRental
+      tags: [Facility Rentals]
+      summary: Create a site reservation
+      description: |
+        Creates a new facility rental (site reservation).
+
+        **Notes:**
+        - `timestampRange` — PostgreSQL-style range: `[` = inclusive start, `)` = exclusive end. Times are in the location's timezone.
+        - `courtIds` — array of site UUIDs to reserve. Despite the name, accepts any site type (court, field, room, etc.). Typically one site per reservation.
+        - Do **not** include `attendeeCount` for sites with `capacity: 0` (uncapped), or the API will reject with `"Attendee count exceeds site capacity"`.
+        - The site must have `isInstantBookable: true` (check via `GET /v1/sites/{siteId}`).
+
+        **Important:** The order is created with `status: "pending"` and has an expiration timer (~10 minutes). You must complete the order by calling `POST /v1/orders/{orderId}/pay` before it expires, even for free ($0) reservations.
+      security:
+        - firebaseAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FacilityRentalRequest'
+            example:
+              data:
+                reservation:
+                  timestampRange: "[2026-03-05 13:00:00, 2026-03-05 14:00:00)"
+                  locationId: 38a201f0-4fb1-4991-8e72-db8a9495319e
+                  courtIds:
+                    - 99b7129e-5ed4-4fd8-aba2-fee1683310bb
+      responses:
+        '201':
+          description: Facility rental created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      order:
+                        $ref: '#/components/schemas/Order'
+                      facilityRental:
+                        $ref: '#/components/schemas/FacilityRental'
+              example:
+                data:
+                  order:
+                    id: 6334b6ee-dab8-4bd7-ba56-c38c51df3a16
+                    flow: cart
+                    status: pending
+                    timeRemainingMs: 599523
+                    expiresAt: "2026-02-28T19:09:37.457Z"
+                    currency: USD
+                    subtotal: 0
+                    total: 0
+                    customer:
+                      id: user-uuid
+                      firstName: John
+                      lastName: Doe
+                      email: john@example.com
+                    organization:
+                      id: org-uuid
+                      name: Town of Corte Madera
+                    items:
+                      - id: item-uuid
+                        name: "Court Reservation: A"
+                        basePrice: 0
+                        finalPrice: 0
+                        productType: site-reservation
+                        details:
+                          bookingId: booking-uuid
+                          reservationId: reservation-uuid
+                          reservationType: court-reservation
+                          timestampRange: ["2026-03-05 13:00:00", "2026-03-05 14:00:00"]
+                          location:
+                            id: location-uuid
+                            name: Granada Park
+                          sites:
+                            - id: court-uuid
+                              name: A
+                              type: court
+                  facilityRental:
+                    id: facility-rental-uuid
+                    status: confirmed
+                    bookingType: instant
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ── Orders ──────────────────────────────────────────────
+  /v1/orders/current:
+    get:
+      operationId: getCurrentOrder
+      tags: [Orders]
+      summary: Get current active order
+      security:
+        - firebaseAuth: []
+      responses:
+        '200':
+          description: Current active order
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/orders:
+    get:
+      operationId: listOrders
+      tags: [Orders]
+      summary: List orders by booking
+      security:
+        - firebaseAuth: []
+      parameters:
+        - name: bookingId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Filter orders by booking ID.
+      responses:
+        '200':
+          description: Orders list
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/orders/{orderId}:
+    get:
+      operationId: getOrder
+      tags: [Orders]
+      summary: Get order detail
+      description: Wraps response in an `order` key.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order:
+                    $ref: '#/components/schemas/Order'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    delete:
+      operationId: deleteOrder
+      tags: [Orders]
+      summary: Delete/cancel a pending order
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order deleted
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v2/orders/{orderId}:
+    get:
+      operationId: getOrderV2
+      tags: [Orders]
+      summary: Get order detail (v2)
+      description: Order detail v2 endpoint. Supports `include[]=installments` for installment plan details.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - name: include[]
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [installments]
+          style: form
+          explode: true
+          description: Sideloaded relations.
+      responses:
+        '200':
+          description: Order detail v2
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/orders/{orderId}/items:
+    get:
+      operationId: listOrderItems
+      tags: [Orders]
+      summary: Get order line items
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order line items
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/orders/{orderId}/transaction-events:
+    get:
+      operationId: listOrderTransactionEvents
+      tags: [Orders]
+      summary: Get payment history
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Payment history
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/orders/{orderId}/pay:
+    post:
+      operationId: payOrder
+      tags: [Orders]
+      summary: Submit payment
+      description: |
+        Submits payment for an order.
+
+        **Payment method types:**
+
+        | Type | Use case | API-callable? |
+        |---|---|---|
+        | `free` | $0 reservations (`amountCents` must be `0`) | Yes |
+        | `ACH` | Triggers Stripe PaymentIntent for card payment | Yes (see below) |
+        | `cardOnline` | Used by the web frontend only | **No** — rejected with `E_INVALID_BODY` |
+        | `organizationCredit` | Org credit balance | Untested |
+        | `check` | Check (also requires `checkNumber` field) | Admin only |
+        | `cash` | Cash payment | Admin only (`E_FORBIDDEN` for consumers) |
+        | `cardPresent` | In-person card (also requires `providerReaderId` field) | Admin only |
+        | `giftCard` | Gift card (also requires `storedValueAccountCode` field) | Untested |
+        | `scholarship` | Scholarship (also requires `storedValueAccountCode` field) | Untested |
+
+        ### Paying with a saved card (Stripe flow)
+
+        The `cardOnline` payment type is rejected by the API with `E_INVALID_BODY` when called directly. To pay with a saved card via the API, use `paymentMethodType: "ACH"` instead — this creates a Stripe PaymentIntent that you then confirm with the Stripe API using a saved card.
+
+        **Stripe publishable key:** `pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB`
+
+        **Step 1:** Submit payment with `ACH` type. The response includes `included.payments[]` with Stripe PaymentIntent details.
+
+        **Key fields in `gatewayData`:**
+        - `paymentIntentId` — the Stripe PaymentIntent ID (`pi_...`)
+        - `clientSecret` — the client secret needed to confirm the PaymentIntent
+        - `paymentMethods[]` — the user's saved cards (same data as from `payment-method-setup`)
+
+        **Step 2:** Confirm the PaymentIntent via Stripe API:
+
+        ```bash
+        curl -s -X POST "https://api.stripe.com/v1/payment_intents/${PAYMENT_INTENT_ID}/confirm" \
+          -u "${STRIPE_PUBLISHABLE_KEY}:" \
+          -d "payment_method=${PAYMENT_METHOD_ID}" \
+          -d "client_secret=${CLIENT_SECRET}"
+        ```
+
+        Once Stripe confirms the payment, the rec.us order is automatically settled via webhook. The order's `totalAmountRemaining` drops to 0 and the payment status changes to `succeeded`.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+            examples:
+              free:
+                summary: Free ($0) payment
+                value:
+                  data:
+                    payments:
+                      - paymentMethodType: free
+                        amountCents: 0
+              card:
+                summary: Card payment via Stripe (ACH type)
+                value:
+                  data:
+                    payments:
+                      - paymentMethodType: ACH
+                        amountCents: 750
+      responses:
+        '200':
+          description: |
+            Payment result. For "free" payments, `data` contains the transaction event with `status: "succeeded"`.
+            For "ACH" payments, the response additionally includes `included.payments[]` with Stripe PaymentIntent details needed to confirm the payment via the Stripe API.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/TransactionEvent'
+                  included:
+                    type: object
+                    properties:
+                      payments:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PaymentWithGateway'
+                    description: Present only for non-free payment types (e.g. ACH).
+              examples:
+                free:
+                  summary: Free ($0) payment settled immediately
+                  value:
+                    data:
+                      id: transaction-event-uuid
+                      type: payment
+                      status: succeeded
+                      orderId: order-uuid
+                      settledAt: "2026-02-28T19:01:55.059Z"
+                ach:
+                  summary: ACH payment pending Stripe confirmation
+                  value:
+                    data:
+                      id: transaction-event-uuid
+                      type: payment
+                      status: pending
+                      orderId: order-uuid
+                      settledAt: null
+                    included:
+                      payments:
+                        - id: payment-uuid
+                          orderId: order-uuid
+                          referenceId: pi_3T5tvECMyY4UUjhB1Is9sEQ2
+                          gateway: stripe
+                          gatewayData:
+                            provider: stripe
+                            paymentIntentId: pi_3T5tvECMyY4UUjhB1Is9sEQ2
+                            clientSecret: "pi_3T5tvECMyY4UUjhB1Is9sEQ2_secret_..."
+                            paymentMethods:
+                              - id: pm_1Sygm4CMyY4UUjhBOhNeoApv
+                                card:
+                                  brand: visa
+                                  exp_month: 1
+                                  exp_year: 2031
+                                  last4: "7510"
+                          amount: 750
+                          currency: USD
+                          status: pending
+                          paymentMethodType: ACH
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/orders/{orderId}/apply-discount:
+    post:
+      operationId: applyOrderDiscount
+      tags: [Orders]
+      summary: Apply discount/promo code
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Discount applied
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/order-items/{orderItemId}:
+    delete:
+      operationId: deleteOrderItem
+      tags: [Orders]
+      summary: Remove an item from an order
+      security:
+        - firebaseAuth: []
+      parameters:
+        - name: orderItemId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Item removed
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Bookings ────────────────────────────────────────────
+  /v1/users/{userId}/bookings:
+    get:
+      operationId: listUserBookings
+      tags: [Bookings]
+      summary: List all bookings
+      description: |
+        Returns all bookings for a user. **Paginated** (`data`/`meta` envelope — see Pagination).
+
+        **Notes:**
+        - `timeStatus` — `"future"` for upcoming bookings, `"past"` for completed ones.
+        - `canceledAt` — non-null if the booking was cancelled.
+        - `type` — `"facilityRental"` for site bookings, `"session"` for group classes, etc.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/PaginationBracketNum'
+        - $ref: '#/components/parameters/PaginationBracketSize'
+        - $ref: '#/components/parameters/PaginationFlatPage'
+        - $ref: '#/components/parameters/PaginationFlatPageSize'
+      responses:
+        '200':
+          description: Paginated list of bookings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BookingSummary'
+                  meta:
+                    $ref: '#/components/schemas/DataMetaPagination'
+              example:
+                data:
+                  - id: 75894d52-d00f-4fc3-acdc-6c94832dcf67
+                    status: confirmed
+                    createdAt: "2026-02-26T18:25:05.718Z"
+                    updatedAt: "2026-02-26T18:25:23.032Z"
+                    canceledAt: null
+                    cancelReason: null
+                    canceledByUserId: null
+                    creatorUserId: user-uuid
+                    customerUserId: user-uuid
+                    participantUserId: user-uuid
+                    organizationId: org-uuid
+                    isFastTrack: false
+                    sectionId: null
+                    sessionId: null
+                    linkedReservationId: null
+                    facilityRentalId: facility-rental-uuid
+                    type: facilityRental
+                    timeStatus: future
+                meta:
+                  pg:
+                    num: 1
+                    size: 25
+                    totalResults: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/users/{userId}/planned-bookings:
+    get:
+      operationId: listUserPlannedBookings
+      tags: [Bookings]
+      summary: List upcoming bookings
+      description: |
+        Returns only upcoming bookings with sideloaded includes. **Paginated** (`data`/`meta` envelope — see Pagination).
+        May return empty if no planned bookings exist.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/PaginationBracketNum'
+        - $ref: '#/components/parameters/PaginationBracketSize'
+        - $ref: '#/components/parameters/PaginationFlatPage'
+        - $ref: '#/components/parameters/PaginationFlatPageSize'
+      responses:
+        '200':
+          description: Paginated list of upcoming bookings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BookingSummary'
+                  meta:
+                    $ref: '#/components/schemas/DataMetaPagination'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/bookings/{bookingId}:
+    get:
+      operationId: getBooking
+      tags: [Bookings]
+      summary: Get booking detail
+      description: Returns a single booking with sideloaded includes.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+        - name: include[]
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - facilityRental
+                - section
+                - reservations
+                - sites
+                - locations
+                - reservationSiteIds
+                - customer
+                - participant
+          style: form
+          explode: true
+          description: Sideloaded relations (repeatable).
+      responses:
+        '200':
+          description: Booking detail with includes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookingDetailResponse'
+              example:
+                data:
+                  booking:
+                    id: booking-uuid
+                    status: confirmed
+                    canceledAt: null
+                    organizationId: org-uuid
+                    facilityRentalId: facility-rental-uuid
+                    type: facilityRental
+                included:
+                  facilityRental:
+                    id: facility-rental-uuid
+                    name: "Court Reservation: A"
+                    status: confirmed
+                    bookingType: instant
+                    canceledAt: null
+                  reservations:
+                    - id: reservation-uuid
+                      locationId: location-uuid
+                      reservationCost: 0
+                      reservationCostCurrency: USD
+                      reservationType: court-reservation
+                      reservationTimestampRange: ["2026-03-05 13:00:00", "2026-03-05 14:00:00"]
+                      startsAt: "2026-03-05T21:00:00.000Z"
+                      endsAt: "2026-03-05T22:00:00.000Z"
+                      canceledAt: null
+                  sites:
+                    - id: site-uuid
+                      locationId: location-uuid
+                      courtNumber: A
+                      type: court
+                  locations:
+                    - id: location-uuid
+                      name: Granada Park
+                      timezone: America/Los_Angeles
+                  reservationSiteIds:
+                    reservation-uuid: [site-uuid]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/bookings/{bookingId}/refund-eligibility-deadline:
+    get:
+      operationId: getRefundEligibility
+      tags: [Bookings]
+      summary: Check refund eligibility
+      description: |
+        Returns refund eligibility information. The frontend polls this every 1 second until `suggestionGenerated` is `true`. If `eligibleUntil` is in the future, a refund is available.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: Refund eligibility
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RefundEligibility'
+              example:
+                data:
+                  suggestionGenerated: true
+                  eligibleUntil: "2026-03-04T10:00:00Z"
+                  recommendationJustification: "..."
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/bookings/{bookingId}/refund-preview:
+    get:
+      operationId: getRefundPreview
+      tags: [Bookings]
+      summary: Preview refund amount and destinations
+      description: |
+        Returns refund preview with amount and available destinations.
+
+        **Notes:**
+        - `refundType` — `"full"`, `"partial"`, or `"zero"`.
+        - `applicable: false` for free ($0) bookings — no refund preview needed, just cancel directly.
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      responses:
+        '200':
+          description: Refund preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RefundPreview'
+              examples:
+                paid:
+                  summary: Paid booking eligible for refund
+                  value:
+                    data:
+                      applicable: true
+                      eligibleDestinations: [original_payment_methods, account_credit]
+                      destinations:
+                        originalPaymentMethods:
+                          amountCents: 750
+                          formattedAmount: "$7.50"
+                          destinationSummary: Visa ending in 7510
+                        accountCredit:
+                          amountCents: 750
+                          formattedAmount: "$7.50"
+                          destinationSummary: Account credit
+                      refundType: full
+                free:
+                  summary: Free booking (no refund applicable)
+                  value:
+                    data:
+                      applicable: false
+                      reason: unsupported_booking_type
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/bookings/{bookingId}/cancel:
+    post:
+      operationId: cancelBooking
+      tags: [Bookings]
+      summary: Cancel a booking
+      description: |
+        Cancels a booking.
+
+        **Notes:**
+        - `canceledAt` is set on success. The `status` remains `"confirmed"` (not changed to `"cancelled"`).
+        - `refundDestination` values: `"original_payment_methods"` or `"account_credit"`.
+        - For free bookings, the `refund-preview` returns `applicable: false` — skip the refund flow and just POST cancel directly with no body (or empty `{}`).
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/BookingId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                data:
+                  type: object
+                  properties:
+                    refundDestination:
+                      type: string
+                      enum:
+                        - original_payment_methods
+                        - account_credit
+                      description: Required for paid bookings. Omit for free bookings.
+            examples:
+              paid:
+                summary: Cancel paid booking with refund
+                value:
+                  data:
+                    refundDestination: original_payment_methods
+              free:
+                summary: Cancel free booking (no body needed)
+                value: {}
+      responses:
+        '200':
+          description: Booking cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/BookingSummary'
+              example:
+                data:
+                  id: booking-uuid
+                  status: confirmed
+                  canceledAt: "2026-03-03T21:36:44.057Z"
+                  canceledByUserId: user-uuid
+                  facilityRentalId: facility-rental-uuid
+                  type: facilityRental
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Payments ────────────────────────────────────────────
+  /v1/payments/{paymentId}:
+    get:
+      operationId: getPayment
+      tags: [Payments]
+      summary: Get payment detail
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment detail
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/payments/{paymentId}/cancel:
+    post:
+      operationId: cancelPayment
+      tags: [Payments]
+      summary: Cancel a payment
+      security:
+        - firebaseAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    firebaseAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Firebase Auth ID token. See the Authentication section in the API description for full sign-in flow details.
+
+        Firebase project: `rec-prod`
+        Firebase Web API key: `AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s`
+
+        Obtain a token via:
+        ```
+        POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s
+        Body: {"email": "...", "password": "...", "returnSecureToken": true}
+        ```
+
+        The `idToken` from the response is used as the Bearer token. Tokens expire after 1 hour; use `refreshToken` to renew.
+
+  parameters:
+    PaginationBracketNum:
+      name: pg[num]
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: Page number (bracket style). 1-indexed. Interchangeable with flat `page` param.
+
+    PaginationBracketSize:
+      name: pg[size]
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 25
+      description: Page size (bracket style). Interchangeable with flat `pageSize` param.
+
+    PaginationFlatPage:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+      description: Page number (flat style). 1-indexed. Interchangeable with bracket `pg[num]` param.
+
+    PaginationFlatPageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 25
+      description: Page size (flat style). Interchangeable with bracket `pg[size]` param.
+
+    LocationId:
+      name: locationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    SiteId:
+      name: siteId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    OrganizationSlugOrId:
+      name: organizationSlugOrId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Organization slug (e.g. "san-francisco-rec-park") or UUID.
+
+    OrganizationId:
+      name: organizationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    BookingId:
+      name: bookingId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    InstructorId:
+      name: instructorId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: Authentication required or token invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            correlationId: 550e8400-e29b-41d4-a716-446655440000
+            message: Authentication required
+            obstructions: []
+            type: E_UNAUTHORIZED
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Not authorized for this action
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            correlationId: 550e8400-e29b-41d4-a716-446655440000
+            message: Forbidden
+            obstructions: []
+            type: E_FORBIDDEN
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        correlationId:
+          type: string
+          format: uuid
+        message:
+          type: string
+          description: Human-readable error message.
+        obstructions:
+          type: array
+          items: {}
+        type:
+          type: string
+          description: Error code.
+          enum:
+            - E_UNAUTHORIZED
+            - E_COURT_NOT_FOUND
+            - E_SECTION_NOT_FOUND
+            - E_INELIGIBLE_SITE_BOOKING
+            - E_INVALID_BODY
+            - E_INVALID_REQUEST
+            - E_FORBIDDEN
+
+    DataMetaPagination:
+      type: object
+      description: Pagination metadata for data/meta envelope responses. More pages exist while `pg.num * pg.size < pg.totalResults`.
+      properties:
+        pg:
+          type: object
+          properties:
+            num:
+              type: integer
+              description: Current page number.
+            size:
+              type: integer
+              description: Page size.
+            totalResults:
+              type: integer
+              description: Total number of results across all pages.
+
+    Sport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+
+    Region:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        lat:
+          type: string
+          description: Latitude as string.
+        lng:
+          type: string
+          description: Longitude as string.
+        radius:
+          type: integer
+
+    OrganizationSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        displayName:
+          type: string
+        logo:
+          type:
+            - string
+            - "null"
+        fullLogo:
+          type:
+            - string
+            - "null"
+        config:
+          type: object
+          properties:
+            general:
+              type: object
+              properties:
+                primaryState:
+                  type: string
+                primaryTimezone:
+                  type: string
+
+    OrganizationDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        logo:
+          type:
+            - string
+            - "null"
+        fullLogo:
+          type:
+            - string
+            - "null"
+        config:
+          type: object
+          properties:
+            tabs:
+              type: object
+              description: |
+                Controls which features are enabled for the organization. A tab with `"enabled": false` is disabled. Possible tabs: `locations` (court reservations), `coaching` (private lessons), `programs` (group classes / lesson packs), `facilityRentals` (picnic/event space rentals), `membershipsAndPasses` (membership programs).
+              additionalProperties:
+                type: object
+                properties:
+                  name:
+                    type: string
+                  order:
+                    type: integer
+                  enabled:
+                    type: boolean
+            banners:
+              type: object
+              properties:
+                pages:
+                  type: object
+                  additionalProperties:
+                    type:
+                      - string
+                      - "null"
+                  description: Keyed by page path pattern (e.g. "/locations/{locationId}"). Values are markdown banner text.
+            general:
+              type: object
+              properties:
+                primaryState:
+                  type: string
+                primaryTimezone:
+                  type: string
+            lessons:
+              type: object
+              properties:
+                restrictions:
+                  type: object
+                  properties:
+                    allowedDurations:
+                      type: object
+                      properties:
+                        minutes:
+                          type: array
+                          items:
+                            type: integer
+                    maxWeeklyBookings:
+                      type: integer
+        activityOrCategoryOrder:
+          type:
+            - array
+            - "null"
+          items: {}
+
+    LocationDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        formattedAddress:
+          type: string
+        lat:
+          type: string
+        lng:
+          type: string
+        placeId:
+          type:
+            - string
+            - "null"
+        hoursOfOperation:
+          type:
+            - string
+            - "null"
+        timezone:
+          type: string
+        playGuidelines:
+          type:
+            - string
+            - "null"
+          description: Detailed markdown with reservation rules, site assignments, hours, etc. Very useful for understanding location-specific policies.
+        accessInfo:
+          type:
+            - string
+            - "null"
+        gettingThereInfo:
+          type:
+            - string
+            - "null"
+        defaultReservationWindow:
+          type: integer
+          description: How many days in advance reservations open (e.g. 7 = one week ahead).
+        reservationReleaseTimeLocal:
+          type:
+            - string
+            - "null"
+          description: The local time when new reservation slots become available (e.g. "08:00:00" = 8 AM).
+        reservationBuffer:
+          type: integer
+        privateLessonReservationWindow:
+          type: integer
+        organizationId:
+          type: string
+          format: uuid
+        images:
+          $ref: '#/components/schemas/LocationImages'
+        organization:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            slug:
+              type: string
+        courts:
+          type: array
+          description: |
+            Despite the key name, contains **all** site types (courts, fields, rooms, picnic tables, etc.). Each entry has a `type` field.
+          items:
+            $ref: '#/components/schemas/SiteInLocation'
+        tags:
+          type: array
+          items: {}
+        regions:
+          type: array
+          items: {}
+
+    LocationImages:
+      type: object
+      properties:
+        detail:
+          type:
+            - string
+            - "null"
+        thumbnail:
+          type:
+            - string
+            - "null"
+        mainGallery:
+          type:
+            - string
+            - "null"
+        smallGallery1:
+          type:
+            - string
+            - "null"
+        smallGallery2:
+          type:
+            - string
+            - "null"
+
+    SiteInLocation:
+      type: object
+      description: |
+        A site (bookable unit) as nested under a location's `courts[]` array. Despite the array name `courts`, this contains all site types.
+      properties:
+        id:
+          type: string
+          format: uuid
+        courtNumber:
+          type: string
+          description: Display name for the site (e.g. "Court 1", "Field A", "Room 201", "Picnic Table A"). Despite the field name, applies to all site types.
+        maxReservationTime:
+          type: string
+          description: Maximum reservation duration as HH:MM:SS string.
+        noReservationText:
+          type:
+            - string
+            - "null"
+          description: If set (e.g. "Not Reservable"), the site is walk-up only.
+        allowPrivateLessons:
+          type: boolean
+        type:
+          type:
+            - string
+            - "null"
+          description: 'Site type. Values: "court", "field", "room", "picnic-table", "outdoor-event-space", "bounce-house", "rink", or null.'
+        capacity:
+          type:
+            - integer
+            - "null"
+        description:
+          type:
+            - string
+            - "null"
+        bufferMinutesBetweenReservations:
+          type: integer
+        isInstantBookable:
+          type: boolean
+          description: Whether the site can be booked directly.
+        allowedReservationDurations:
+          type: object
+          properties:
+            minutes:
+              type: array
+              items:
+                type: integer
+          description: The set of durations (in minutes) this site supports.
+        config:
+          type: object
+          properties:
+            pricing:
+              type: object
+              properties:
+                default:
+                  $ref: '#/components/schemas/Pricing'
+            bookingPolicies:
+              type: array
+              items:
+                $ref: '#/components/schemas/BookingPolicy'
+              description: >
+                Optional. When present with type "fixed-slots" and isActive true,
+                the site uses pre-defined time blocks.
+            deposits:
+              type: object
+        sports:
+          type: array
+          items:
+            $ref: '#/components/schemas/SiteSportReference'
+          description: Sport references. `sportId` references a global sport; the sport **name** is not included here.
+        availableSlots:
+          type: array
+          items:
+            type: string
+          description: Bookable start times as "YYYY-MM-DD HH:MM:SS" strings in the location's timezone. Covers the upcoming reservation window.
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/WeeklySlotTemplate'
+          description: Recurring weekly schedule template.
+        images:
+          type: object
+          properties:
+            map:
+              type: array
+              items: {}
+            mainGallery:
+              type: array
+              items: {}
+        amenities:
+          type: object
+          properties:
+            amenityTagIds:
+              type: array
+              items: {}
+
+    Pricing:
+      type: object
+      properties:
+        type:
+          type: string
+          description: Pricing type (e.g. "perHour").
+        cents:
+          type: integer
+          description: Price in cents.
+
+    BookingPolicy:
+      type: object
+      properties:
+        type:
+          type: string
+          description: Policy type (e.g. "fixed-slots").
+        isActive:
+          type: boolean
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              dayOfWeek:
+                type: integer
+                description: Day of week. 1=Monday through 7=Sunday.
+              startTimeLocal:
+                type: string
+                description: Slot start time (HH:MM:SS) in local timezone.
+              endTimeLocal:
+                type: string
+                description: Slot end time (HH:MM:SS) in local timezone.
+
+    SiteSportReference:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        courtId:
+          type: string
+          format: uuid
+        sportId:
+          type: string
+          format: uuid
+          description: References a global sport ID (e.g. bd745b6e-1dd6-43e2-a69f-06f094808a96 = Tennis).
+        price:
+          type: integer
+        currency:
+          type: string
+
+    WeeklySlotTemplate:
+      type: object
+      description: Recurring weekly schedule template entry.
+      properties:
+        type:
+          type: string
+          description: Slot type (e.g. "PRIVATE").
+        openFrom:
+          type: string
+          description: Opening time (HH:MM:SS).
+        openTo:
+          type: string
+          description: Closing time (HH:MM:SS).
+        dayOfWeek:
+          type: integer
+          description: Day of week. 0=Sunday, 1=Monday, etc.
+
+    SlotAvailability:
+      type: object
+      properties:
+        availableDurationsMinutes:
+          type: array
+          items:
+            type: integer
+          description: Available booking durations (in minutes) starting at this time.
+
+    ScheduleResponse:
+      type: object
+      properties:
+        dates:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/ScheduleSiteEntry'
+          description: Keyed by date in YYYYMMDD format (no separators).
+        reservations:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ScheduleReservation'
+          description: Keyed by reservation UUID. Contains cost (in cents), who booked it, which site, and booking type.
+        users:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ScheduleUser'
+          description: Keyed by user UUID. Only shows first initial and last initial for privacy.
+        instructors:
+          type: object
+          additionalProperties:
+            type: object
+          description: Populated when schedule includes instructor lessons. Empty for pure reservation schedules.
+        classes:
+          type: object
+          additionalProperties:
+            type: object
+          description: Populated when schedule includes group classes. Empty for pure reservation schedules.
+        sessions:
+          type: object
+          additionalProperties:
+            type: object
+          description: Populated when schedule includes sessions. Empty for pure reservation schedules.
+        facilityRentals:
+          type: object
+          additionalProperties:
+            type: object
+          description: Populated when schedule includes facility rentals. Empty for pure reservation schedules.
+
+    ScheduleSiteEntry:
+      type: object
+      description: |
+        A site's schedule for a specific date. Note: there is no site UUID in the schedule's per-site entries — only `courtNumber` and `sports`. Site UUIDs appear only in `reservations[].courts[]` for booked slots.
+      properties:
+        courtNumber:
+          type: string
+          description: Display name for the site (e.g. "Court 1", "Court A"). Despite the field name, applies to all site types.
+        sports:
+          type: array
+          items:
+            $ref: '#/components/schemas/SportWithName'
+        schedule:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ScheduleSlot'
+          description: 'Keyed by "HH:MM, HH:MM" (start time, end time in 24h local time).'
+
+    SportWithName:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    ScheduleSlot:
+      type: object
+      properties:
+        referenceType:
+          type: string
+          enum: [RESERVABLE, RESERVATION, OPEN]
+          description: |
+            RESERVABLE = open slot, can be booked.
+            RESERVATION = already booked, `referenceId` links to the reservations dict.
+            OPEN = not reservable, `referenceLabel` explains why.
+        referenceId:
+          type: string
+          format: uuid
+          description: Present when referenceType is RESERVATION. Links to the reservations dict.
+        referenceLabel:
+          type: string
+          description: Present when referenceType is OPEN. Explains why the slot is not reservable (e.g. "Not Reservable").
+
+    ScheduleReservation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        reservationType:
+          type: string
+          description: 'Type of reservation (e.g. "court-reservation").'
+        reservationCost:
+          type: integer
+          description: Cost in cents.
+        reservationCostCurrency:
+          type: string
+        guestPrice:
+          type: integer
+        capacity:
+          type: integer
+        paid:
+          type: boolean
+        visibility:
+          type: string
+        doNotMarket:
+          type: boolean
+        groupsOnly:
+          type:
+            - string
+            - "null"
+        classId:
+          type:
+            - string
+            - "null"
+        sessionId:
+          type:
+            - string
+            - "null"
+        instructorId:
+          type:
+            - string
+            - "null"
+        facilityRentalId:
+          type:
+            - string
+            - "null"
+        linkedReservationId:
+          type:
+            - string
+            - "null"
+        locationId:
+          type: string
+          format: uuid
+        users:
+          type: array
+          items:
+            type: string
+          description: User UUIDs who booked this slot.
+        courts:
+          type: array
+          items:
+            type: string
+          description: Site UUIDs (key name is misleading — contains all site types, not just courts).
+
+    ScheduleUser:
+      type: object
+      description: Privacy-truncated user info shown in schedule.
+      properties:
+        id:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+          description: First initial only (e.g. "K").
+        lastName:
+          type: string
+          description: Last initial only (e.g. "N").
+        image:
+          type:
+            - string
+            - "null"
+        skillLevel:
+          type:
+            - string
+            - "null"
+          description: 'Skill level (e.g. "first-timer", "beginner", "intermediate", "advanced").'
+        primarySportId:
+          type:
+            - string
+            - "null"
+
+    AvailabilityLocationWrapper:
+      type: object
+      properties:
+        distance:
+          type:
+            - number
+            - "null"
+          description: Populated when filtering by lat/lng, otherwise null.
+        location:
+          $ref: '#/components/schemas/AvailabilityLocation'
+
+    AvailabilityLocation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        formattedAddress:
+          type: string
+        lat:
+          type: string
+        lng:
+          type: string
+        hoursOfOperation:
+          type:
+            - string
+            - "null"
+        timezone:
+          type: string
+        organizationId:
+          type: string
+          format: uuid
+        defaultReservationWindow:
+          type: integer
+        reservationReleaseTimeLocal:
+          type:
+            - string
+            - "null"
+        playGuidelines:
+          type:
+            - string
+            - "null"
+        images:
+          type: object
+          properties:
+            thumbnail:
+              type:
+                - string
+                - "null"
+        courts:
+          type: array
+          description: |
+            Despite the key name, contains all site types (courts, fields, rooms, picnic tables, etc.). Each entry has a `type` field.
+          items:
+            $ref: '#/components/schemas/SiteInLocation'
+
+    InstructorCard:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        firstName:
+          type: string
+        lastName:
+          type: string
+        fullName:
+          type: string
+        shortDescription:
+          type:
+            - string
+            - "null"
+        profileImage:
+          type:
+            - string
+            - "null"
+        tags:
+          type: array
+          items: {}
+        config:
+          type: object
+          properties:
+            offersLessonPacks:
+              type: boolean
+            doNotMarketForLessons:
+              type: boolean
+        sports:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              hourlyRate:
+                type: integer
+                description: Hourly rate in dollars.
+        certifications:
+          type: array
+          items: {}
+        lessons:
+          type: array
+          description: Upcoming available time slots for booking a private lesson with this instructor.
+          items:
+            $ref: '#/components/schemas/InstructorLesson'
+
+    InstructorLesson:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        reservationTimestampRange:
+          type: object
+          properties:
+            from:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                time:
+                  type: string
+            to:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                time:
+                  type: string
+            inclusive:
+              type: object
+              properties:
+                lower:
+                  type: boolean
+                upper:
+                  type: boolean
+        classId:
+          type:
+            - string
+            - "null"
+        classRecommendedLevel:
+          type:
+            - string
+            - "null"
+        className:
+          type:
+            - string
+            - "null"
+        sport:
+          $ref: '#/components/schemas/SportWithName'
+        location:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+
+    InstructorDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        shortDescription:
+          type:
+            - string
+            - "null"
+        longBio:
+          type:
+            - string
+            - "null"
+          description: Markdown string with full bio, availability, pricing.
+        canTeachPrivateLessons:
+          type: boolean
+        isPro:
+          type: boolean
+        tags:
+          type: array
+          items: {}
+        certifications:
+          type: array
+          items: {}
+        images:
+          type: object
+          properties:
+            instructorAvatar80x80:
+              type:
+                - string
+                - "null"
+            instructor152x89:
+              type:
+                - string
+                - "null"
+            instructor152x240:
+              type:
+                - string
+                - "null"
+            instructor240x140:
+              type:
+                - string
+                - "null"
+        config:
+          type: object
+          properties:
+            doNotMarketForLessons:
+              type: boolean
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+            lastName:
+              type: string
+        sports:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              hourlyRate:
+                type: integer
+        instructorLocations:
+          type: array
+          description: Locations this instructor teaches at, with per-location hourly rates (may differ from the base rate in `sports[]`).
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              instructorId:
+                type: string
+                format: uuid
+              locationId:
+                type: string
+                format: uuid
+              hourlyRate:
+                type: integer
+              sportId:
+                type: string
+                format: uuid
+
+    DiscoverySection:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        timezone:
+          type: string
+        recommendedLevel:
+          type: string
+          description: 'Skill level (e.g. "all", "beginner", "intermediate", "advanced").'
+        sportId:
+          type: string
+          format: uuid
+        sportName:
+          type: string
+        locationName:
+          type: string
+        capacity:
+          type: integer
+          description: Max participants.
+        participantCount:
+          type: integer
+          description: Currently enrolled. Available spots = capacity - participantCount.
+        facilitators:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              firstName:
+                type: string
+              lastName:
+                type: string
+              imageUrl:
+                type:
+                  - string
+                  - "null"
+        sessions:
+          type: array
+          description: Individual meeting dates/times. Timestamps are in the section's timezone.
+          items:
+            type: object
+            properties:
+              timestampRange:
+                type: array
+                items:
+                  type: string
+                description: '[startTime, endTime] as "YYYY-MM-DD HH:MM:SS" strings.'
+
+    SiteDetail:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        courtNumber:
+          type: string
+          description: Display name (e.g. "A", "Court 1", "Picnic Table 3"). Despite the field name, applies to all site types.
+        capacity:
+          type: integer
+          description: 0 means no cap on attendees.
+        isInstantBookable:
+          type: boolean
+          description: If true, the site can be booked directly via the facility-rentals endpoint. If false, may require request/approval flow.
+        noReservationText:
+          type:
+            - string
+            - "null"
+          description: If set (e.g. "Not Reservable"), the site is walk-up only.
+        locationId:
+          type: string
+          format: uuid
+        locationName:
+          type: string
+        config:
+          type: object
+          properties:
+            pricing:
+              type: object
+              properties:
+                default:
+                  $ref: '#/components/schemas/Pricing'
+            deposits:
+              type: object
+            bookingPolicies:
+              type: array
+              items:
+                $ref: '#/components/schemas/BookingPolicy'
+              description: |
+                Optional. When present with `type: "fixed-slots"` and `isActive: true`, the site uses pre-defined time blocks instead of flexible durations. The `timestampRange` in a facility-rental request **must** exactly match one of these slot boundaries, or the API will reject with "The reservation violates the site's booking policy". `dayOfWeek` uses 1=Monday through 7=Sunday.
+        allowedReservationDurations:
+          type: object
+          properties:
+            minutes:
+              type: array
+              items:
+                type: integer
+        maxReservationTime:
+          type: string
+          description: Maximum reservation duration as HH:MM:SS string.
+        images:
+          type: object
+          properties:
+            map:
+              type: array
+              items: {}
+            mainGallery:
+              type: array
+              items: {}
+        descriptionMd:
+          type:
+            - string
+            - "null"
+        rulesMd:
+          type:
+            - string
+            - "null"
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: rec.us user UUID. Needed for user-scoped endpoints. **Not** the same as firebaseUserId.
+        householdId:
+          type: string
+          format: uuid
+        firebaseUserId:
+          type: string
+          description: Firebase UID.
+        recId:
+          type: string
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+        firstName:
+          type: string
+        lastName:
+          type: string
+        phone:
+          type:
+            - string
+            - "null"
+        formattedAddress:
+          type:
+            - string
+            - "null"
+        skillLevel:
+          type:
+            - string
+            - "null"
+        isInstructor:
+          type: boolean
+        memberships:
+          type: array
+          items: {}
+        organizationRoles:
+          type: object
+        profile:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            userId:
+              type: string
+              format: uuid
+            dateOfBirth:
+              type:
+                - string
+                - "null"
+            gender:
+              type:
+                - string
+                - "null"
+            email:
+              type: string
+              format: email
+            phone:
+              type:
+                - string
+                - "null"
+
+    FacilityRentalRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [reservation]
+          properties:
+            reservation:
+              type: object
+              required: [timestampRange, locationId, courtIds]
+              properties:
+                timestampRange:
+                  type: string
+                  description: |
+                    PostgreSQL-style timestamp range. Format: `[start, end)` where `[` is inclusive and `)` is exclusive. Times are in the location's local timezone.
+                  example: "[2026-03-05 13:00:00, 2026-03-05 14:00:00)"
+                locationId:
+                  type: string
+                  format: uuid
+                courtIds:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  description: Site UUIDs to reserve. Despite the name, accepts any site type. Typically one site per reservation.
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        flow:
+          type: string
+        status:
+          type: string
+          description: 'Order status (e.g. "pending", "completed").'
+        timeRemainingMs:
+          type: [integer, "null"]
+          description: Milliseconds remaining before order expires.
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+        currency:
+          type: string
+        subtotal:
+          type: integer
+          description: Subtotal in cents.
+        total:
+          type: integer
+          description: Total in cents.
+        totalAmountRemaining:
+          type: integer
+          description: Amount still owed in cents. Drops to 0 after payment.
+        customer:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            firstName:
+              type: string
+            lastName:
+              type: string
+            email:
+              type: string
+              format: email
+        organization:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItem'
+
+    OrderItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        basePrice:
+          type: integer
+          description: Base price in cents.
+        finalPrice:
+          type: integer
+          description: Final price in cents (after discounts).
+        productType:
+          type: string
+          description: 'Product type (e.g. "site-reservation").'
+        details:
+          type: object
+          properties:
+            bookingId:
+              type: string
+              format: uuid
+            reservationId:
+              type: string
+              format: uuid
+            reservationType:
+              type: string
+            timestampRange:
+              type: array
+              items:
+                type: string
+              description: '[startTime, endTime] as "YYYY-MM-DD HH:MM:SS" strings.'
+            location:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+            sites:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  type:
+                    type:
+                      - string
+                      - "null"
+
+    FacilityRental:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          description: 'Status (e.g. "confirmed").'
+        bookingType:
+          type: string
+          description: 'Booking type (e.g. "instant").'
+        canceledAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        name:
+          type: string
+
+    PaymentRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [payments]
+          properties:
+            payments:
+              type: array
+              items:
+                type: object
+                required: [paymentMethodType, amountCents]
+                properties:
+                  paymentMethodType:
+                    type: string
+                    enum:
+                      - free
+                      - ACH
+                      - cardOnline
+                      - organizationCredit
+                      - check
+                      - cash
+                      - cardPresent
+                      - giftCard
+                      - scholarship
+                    description: |
+                      Payment method type. API-callable types: "free" ($0 only), "ACH" (triggers Stripe PaymentIntent for card payment). "cardOnline" is rejected with E_INVALID_BODY. Others may be admin-only or untested.
+                  amountCents:
+                    type: integer
+                    description: Amount in cents. Must be 0 for "free" type.
+                  checkNumber:
+                    type: string
+                    description: Required when paymentMethodType is "check".
+                  providerReaderId:
+                    type: string
+                    description: Required when paymentMethodType is "cardPresent".
+                  storedValueAccountCode:
+                    type: string
+                    description: Required when paymentMethodType is "giftCard" or "scholarship".
+
+    TransactionEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          description: 'Event type (e.g. "payment").'
+        status:
+          type: string
+          description: '"succeeded" for immediate settlement (free), "pending" for Stripe payments.'
+        orderId:
+          type: string
+          format: uuid
+        settledAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Set when payment is settled. Null for pending Stripe payments.
+
+    PaymentWithGateway:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderId:
+          type: string
+          format: uuid
+        referenceId:
+          type: string
+          description: Stripe PaymentIntent ID (pi_...).
+        gateway:
+          type: string
+        gatewayData:
+          type: object
+          properties:
+            provider:
+              type: string
+            paymentIntentId:
+              type: string
+              description: Stripe PaymentIntent ID (pi_...).
+            clientSecret:
+              type: string
+              description: Client secret needed to confirm the PaymentIntent.
+            paymentMethods:
+              type: array
+              items:
+                $ref: '#/components/schemas/StripePaymentMethod'
+              description: User's saved cards.
+        amount:
+          type: integer
+          description: Amount in cents.
+        currency:
+          type: string
+        status:
+          type: string
+        paymentMethodType:
+          type: string
+
+    StripePaymentMethod:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Stripe PaymentMethod ID (pm_...). Used when confirming a PaymentIntent via the Stripe API.
+        card:
+          type: object
+          properties:
+            brand:
+              type: string
+            exp_month:
+              type: integer
+            exp_year:
+              type: integer
+            last4:
+              type: string
+
+    PaymentMethodSetupData:
+      type: object
+      properties:
+        provider:
+          type: string
+        setupIntentId:
+          type: string
+          description: Stripe SetupIntent ID. For adding new payment methods (not needed for paying with existing saved card).
+        clientSecret:
+          type: string
+          description: Stripe SetupIntent client secret.
+        paymentMethods:
+          type: array
+          items:
+            $ref: '#/components/schemas/StripePaymentMethod'
+          description: User's saved payment methods for this organization.
+
+    BookingSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        canceledAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Non-null if the booking was cancelled. Note that status remains "confirmed" even after cancellation.
+        cancelReason:
+          type:
+            - string
+            - "null"
+        canceledByUserId:
+          type:
+            - string
+            - "null"
+        creatorUserId:
+          type: string
+          format: uuid
+        customerUserId:
+          type: string
+          format: uuid
+        participantUserId:
+          type: string
+          format: uuid
+        organizationId:
+          type: string
+          format: uuid
+        isFastTrack:
+          type: boolean
+        sectionId:
+          type:
+            - string
+            - "null"
+        sessionId:
+          type:
+            - string
+            - "null"
+        linkedReservationId:
+          type:
+            - string
+            - "null"
+        facilityRentalId:
+          type:
+            - string
+            - "null"
+        type:
+          type: string
+          description: '"facilityRental" for site bookings, "session" for group classes, etc.'
+        timeStatus:
+          type: string
+          description: '"future" for upcoming bookings, "past" for completed ones.'
+
+    BookingDetailResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            booking:
+              $ref: '#/components/schemas/BookingSummary'
+        included:
+          type: object
+          description: Sideloaded relations based on include[] query parameter.
+          properties:
+            facilityRental:
+              $ref: '#/components/schemas/FacilityRental'
+            reservations:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  locationId:
+                    type: string
+                    format: uuid
+                  reservationCost:
+                    type: integer
+                    description: Cost in cents.
+                  reservationCostCurrency:
+                    type: string
+                  reservationType:
+                    type: string
+                  reservationTimestampRange:
+                    type: array
+                    items:
+                      type: string
+                    description: '[startTime, endTime] as "YYYY-MM-DD HH:MM:SS" strings.'
+                  startsAt:
+                    type: string
+                    format: date-time
+                    description: UTC start time.
+                  endsAt:
+                    type: string
+                    format: date-time
+                    description: UTC end time.
+                  canceledAt:
+                    type:
+                      - string
+                      - "null"
+                    format: date-time
+            sites:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  locationId:
+                    type: string
+                    format: uuid
+                  courtNumber:
+                    type: string
+                    description: Display name for the site.
+                  type:
+                    type:
+                      - string
+                      - "null"
+            locations:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  timezone:
+                    type: string
+            reservationSiteIds:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+                  format: uuid
+              description: Maps reservation UUID to array of site UUIDs.
+            customer:
+              type: object
+            participant:
+              type:
+                - object
+                - "null"
+            section:
+              type: object
+
+    RefundEligibility:
+      type: object
+      properties:
+        suggestionGenerated:
+          type: boolean
+          description: Poll until this is true.
+        eligibleUntil:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: If in the future, a refund is available.
+        recommendationJustification:
+          type:
+            - string
+            - "null"
+
+    RefundPreview:
+      type: object
+      description: |
+        Refund preview. `applicable: false` for free ($0) bookings — no refund preview needed, just cancel directly.
+      properties:
+        applicable:
+          type: boolean
+        reason:
+          type: string
+          description: Present when applicable is false (e.g. "unsupported_booking_type").
+        eligibleDestinations:
+          type: array
+          items:
+            type: string
+          description: 'Available refund destinations (e.g. "original_payment_methods", "account_credit").'
+        destinations:
+          type: object
+          properties:
+            originalPaymentMethods:
+              $ref: '#/components/schemas/RefundDestination'
+            accountCredit:
+              $ref: '#/components/schemas/RefundDestination'
+        refundType:
+          type: string
+          description: '"full", "partial", or "zero".'
+
+    RefundDestination:
+      type: object
+      properties:
+        amountCents:
+          type: integer
+        formattedAmount:
+          type: string
+        destinationSummary:
+          type: string

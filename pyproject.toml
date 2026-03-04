@@ -25,5 +25,6 @@ module-root = ""
 dev = [
     "pyright",
     "pytest",
+    "pyyaml",
     "ruff",
 ]

@@ -1,0 +1,4 @@
+rules:
+  info-license: off
+  operation-4xx-response: off
+  no-unused-components: off
