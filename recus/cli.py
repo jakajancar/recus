@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 
 from typing import Annotated
 
@@ -10,8 +11,8 @@ from recus.account_resolver import AccountResolver
 from recus.avails import search as avails_search
 from recus.booking import app as booking_app
 from recus import cli_groups
-from recus.client import AnonClient, AuthClient
-from recus.output import pretty, table
+from recus.client import AnonClient, APIError, AuthClient, LoginError, TokenRefreshError
+from recus.output import console, pretty, table
 from recus.state import user_state
 
 app = App(
@@ -36,7 +37,22 @@ def launcher(
         additional_kwargs["account_resolver"] = account_resolver
     if "account" in ignored:
         additional_kwargs["account"] = account_resolver.required()
-    return command(*bound.args, **bound.kwargs, **additional_kwargs)
+    try:
+        return command(*bound.args, **bound.kwargs, **additional_kwargs)
+    except TokenRefreshError as exc:
+        # Can happen at any time, be more helpful to the user.
+        console.print(f"[bold red]{exc}[/]")
+        console.print(f"Run: recus login --account {exc.account}")
+        raise SystemExit(1) from exc
+    except APIError as exc:
+        # Nicer output of API errors specifically.
+        console.print(f"[bold red]{exc.status_code} {exc.reason}[/]")
+        if exc.body:
+            try:
+                pretty(json.loads(exc.body))
+            except Exception:
+                console.print(exc.body)
+        raise SystemExit(1) from exc
 
 app.command(avails_search, name="avails", group=cli_groups.anon)
 app.command(booking_app)
@@ -56,7 +72,11 @@ def login(*, account_resolver: AccountResolver) -> None:
     password = getpass.getpass("Password: ")
 
     client = AuthClient(account)
-    client.login(password)
+    try:
+        client.login(password)
+    except LoginError as exc:
+        console.print(f"[bold red]{exc}[/]")
+        raise SystemExit(1) from exc
     print(f"Logged in as {account}")
 
 

@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from recus.output import console, pretty
+
 from recus.state import AuthToken, user_state
 
 _API_URL = "https://api.rec.us"
@@ -16,15 +16,43 @@ _FIREBASE_SIGNIN_URL = (
 _FIREBASE_REFRESH_URL = "https://securetoken.googleapis.com/v1/token"
 
 
-def _raise_nice(exc: httpx.HTTPStatusError) -> None:
-    """Re-raise an HTTP error with the response body included."""
+class ClientError(Exception):
+    """Base error for recus client."""
 
-    console.print(f"[bold red]{exc.response.status_code} {exc.response.reason_phrase}[/]")
+
+class LoginError(ClientError):
+    """Login authentication failed."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"Login failed: {reason}")
+
+
+class TokenRefreshError(ClientError):
+    """Token refresh failed — user needs to re-login."""
+
+    def __init__(self, account: str):
+        self.account = account
+        super().__init__(f"Token refresh failed for {account}")
+
+
+class APIError(ClientError):
+    """Unexpected HTTP error from the API."""
+
+    def __init__(self, status_code: int, reason: str, body: str):
+        self.status_code = status_code
+        self.reason = reason
+        self.body = body
+        super().__init__(f"{status_code} {reason}")
+
+
+def _raise_api_error(exc: httpx.HTTPStatusError) -> None:
+    """Re-raise an HTTP error as an APIError."""
     try:
-        pretty(exc.response.json())
+        body = exc.response.text
     except Exception:
-        console.print(exc.response.text)
-    raise SystemExit(1) from exc
+        body = ""
+    raise APIError(exc.response.status_code, exc.response.reason_phrase, body) from exc
 
 
 class Client:
@@ -43,7 +71,7 @@ class Client:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            _raise_nice(exc)
+            _raise_api_error(exc)
         return resp.json()
 
     def get_all(self, path: str, params: dict | None = None) -> list[dict]:
@@ -77,7 +105,7 @@ class Client:
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            _raise_nice(exc)
+            _raise_api_error(exc)
         return resp.json()
 
 
@@ -102,7 +130,7 @@ class AuthClient(Client):
         )
         if resp.status_code != 200:
             detail = resp.json().get("error", {}).get("message", resp.text)
-            raise SystemExit(f"Login failed: {detail}")
+            raise LoginError(detail)
         data = resp.json()
         token = AuthToken(
             email=data["email"],
@@ -124,7 +152,7 @@ class AuthClient(Client):
                     json={"grant_type": "refresh_token", "refresh_token": token.refresh_token},
                 )
                 if resp.status_code != 200:
-                    raise SystemExit(f"Token refresh failed. Run: recus login {self.account}")
+                    raise TokenRefreshError(self.account)
                 data = resp.json()
                 token = AuthToken(
                     email=self.account,
