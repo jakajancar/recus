@@ -1,8 +1,11 @@
 # recus
 
-CLI based on [reverse-engineered API](docs/api.md) behind the [rec.us](https://rec.us) website.
+A CLI for [rec.us](https://rec.us), a booking platform for parks & recreation.
 
 Because you (or your Claw 🦞) shouldn't need to fuss with the web browser to can snag a court.
+
+See also: [the reverse-engineered API documentation](https://jakajancar.github.io/recus/api.html)
+
 
 ## Installation
 
@@ -124,7 +127,7 @@ recus get /v1/organizations
 recus get --auth /v1/users/me
 ```
 
-GET any [API](docs/api.md) path and pretty-print the JSON response. Use `--auth` to include your authentication token.
+GET any API path and pretty-print the JSON response. Use `--auth` to include your authentication token.
 
 ### Log out
 
