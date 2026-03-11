@@ -7,16 +7,16 @@ class PostPayFreeResponse(BaseModel):
     data: PayStatus
 
 
-class PostPayACHResponse(BaseModel):
+class PostPayCardOnlineResponse(BaseModel):
     data: PayStatus
-    included: PayACHIncluded
+    included: PayCardOnlineIncluded
 
 
 class PayStatus(BaseModel):
     status: str
 
 
-class PayACHIncluded(BaseModel):
+class PayCardOnlineIncluded(BaseModel):
     payments: list[Payment]
 
 
