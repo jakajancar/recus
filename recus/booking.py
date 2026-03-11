@@ -14,7 +14,7 @@ from recus.schema.bookings import (
     GetBookingDetailResponse,
 )
 from recus.schema.facility_rentals import PostFacilityRentalResponse
-from recus.schema.orders import PostPayACHResponse, PostPayFreeResponse
+from recus.schema.orders import PostPayCardOnlineResponse, PostPayFreeResponse
 from recus.schema.sites import GetSiteDetailResponse
 from recus.schema.stripe import ConfirmPaymentIntentResponse
 from recus.schema.users import GetMeResponse
@@ -84,7 +84,7 @@ def create(
         print(f"Payment: {pay.data.status}")
     else:
         # Paid booking — card-online flow then Stripe confirmation
-        pay = PostPayACHResponse.model_validate(
+        pay = PostPayCardOnlineResponse.model_validate(
             client.post(
                 f"/v1/orders/{order.id}/pay",
                 json={"data": {"payments": [{"paymentMethodType": "card-online", "amountCents": order.total}]}},
@@ -158,12 +158,16 @@ def list_bookings(*, account: str) -> None:
 
         location_name = inc.locations[0].name if inc.locations else ""
         site_name = inc.sites[0].courtNumber or "" if inc.sites else ""
+        status = b.status or "unknown"
 
         url = f"https://www.rec.us/app/bookings/{b.id}"
         linked_id = f"[link={url}]{b.id}[/link]"
-        rows.append((linked_id, time_str, location_name, site_name))
+        rows.append((linked_id, time_str, location_name, site_name, status))
 
-    table(["id", "time", "location", "site"], rows)
+    table(["id", "time", "location", "site", "status"], rows)
+
+    if any(r[4] != "confirmed" for r in rows):
+        console.print("[yellow]⚠ Some bookings are not confirmed — payment may be incomplete.[/yellow]")
 
 
 @app.command

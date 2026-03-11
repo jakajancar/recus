@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class Booking(BaseModel):
     id: str
+    status: str | None = None
     timeStatus: str | None = None
     canceledAt: str | None = None
 
