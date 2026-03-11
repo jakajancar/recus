@@ -83,11 +83,11 @@ def create(
         )
         print(f"Payment: {pay.data.status}")
     else:
-        # Paid booking — ACH flow then Stripe confirmation
+        # Paid booking — card-online flow then Stripe confirmation
         pay = PostPayACHResponse.model_validate(
             client.post(
                 f"/v1/orders/{order.id}/pay",
-                json={"data": {"payments": [{"paymentMethodType": "ACH", "amountCents": order.total}]}},
+                json={"data": {"payments": [{"paymentMethodType": "card-online", "amountCents": order.total}]}},
             )
         )
         gd = pay.included.payments[0].gatewayData
