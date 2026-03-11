@@ -258,11 +258,11 @@ info:
       jq '.data.paymentMethods[] | {id, brand: .card.brand, last4: .card.last4}'
     # → { "id": "pm_1Sygm4CMyY4UUjhBOhNeoApv", "brand": "visa", "last4": "7510" }
 
-    # 7. Submit payment (use "ACH" type — "cardOnline" is rejected by the API)
+    # 7. Submit payment (use "card-online" type)
     PAY_RESULT=$(curl -s -X POST "https://api.rec.us/v1/orders/$ORDER_ID/pay" \
       -H "Authorization: Bearer $TOKEN" \
       -H "Content-Type: application/json" \
-      -d "{\"data\":{\"payments\":[{\"paymentMethodType\":\"ACH\",\"amountCents\":$TOTAL}]}}")
+      -d "{\"data\":{\"payments\":[{\"paymentMethodType\":\"card-online\",\"amountCents\":$TOTAL}]}}")
 
     # Extract Stripe PaymentIntent details from the response
     PI_ID=$(echo "$PAY_RESULT" | jq -r '.included.payments[0].gatewayData.paymentIntentId')
@@ -287,7 +287,7 @@ info:
 
     **Key differences from the free site flow:**
     - **Fixed-slots sites** require `timestampRange` to exactly match a pre-defined slot boundary (check `config.bookingPolicies`). Using a custom duration like `[16:30, 17:30)` will fail with `"The reservation violates the site's booking policy"`.
-    - **Card payment** is a two-step process: (1) call `/pay` with `paymentMethodType: "ACH"` to create a Stripe PaymentIntent, then (2) confirm it via the Stripe API with a saved `payment_method` ID.
+    - **Card payment** is a two-step process: (1) call `/pay` with `paymentMethodType: "card-online"` to create a Stripe PaymentIntent, then (2) confirm it via the Stripe API with a saved `payment_method` ID.
     - The Stripe publishable key authenticates the `/confirm` call (passed as HTTP basic auth username with empty password).
     - After Stripe confirmation, rec.us is notified via webhook and the order settles automatically.
     - **Daily booking limits** exist per location/date (e.g. 1 reservation per day). Expired unpaid orders may still count against the limit temporarily. The error is `E_INELIGIBLE_SITE_BOOKING` with a message like `"Daily booking limit of 1 reached for March 1, 2026"`.
@@ -1692,8 +1692,8 @@ paths:
         | Type | Use case | API-callable? |
         |---|---|---|
         | `free` | $0 reservations (`amountCents` must be `0`) | Yes |
-        | `ACH` | Triggers Stripe PaymentIntent for card payment | Yes (see below) |
-        | `cardOnline` | Used by the web frontend only | **No** — rejected with `E_INVALID_BODY` |
+        | `card-online` | Triggers Stripe PaymentIntent for card payment | Yes (see below) |
+        | `ACH` | Previously documented but no longer valid | **No** — rejected with `E_INVALID_BODY` |
         | `organizationCredit` | Org credit balance | Untested |
         | `check` | Check (also requires `checkNumber` field) | Admin only |
         | `cash` | Cash payment | Admin only (`E_FORBIDDEN` for consumers) |
@@ -1703,11 +1703,11 @@ paths:
 
         ### Paying with a saved card (Stripe flow)
 
-        The `cardOnline` payment type is rejected by the API with `E_INVALID_BODY` when called directly. To pay with a saved card via the API, use `paymentMethodType: "ACH"` instead — this creates a Stripe PaymentIntent that you then confirm with the Stripe API using a saved card.
+        `card-online` is the correct type for card payments via the API. This creates a Stripe PaymentIntent that you then confirm with the Stripe API using a saved card. Note: `ACH` (previously documented) is no longer accepted and returns `E_INVALID_BODY`.
 
         **Stripe publishable key:** `pk_live_51MPUx4CMyY4UUjhBlgalg5uPiGdXHOWbOTEOioIXfReEeAuLviTRXhdTGvZtTnYtDm2eZonv8buTf73YKIzJHV4i00YikF7WiB`
 
-        **Step 1:** Submit payment with `ACH` type. The response includes `included.payments[]` with Stripe PaymentIntent details.
+        **Step 1:** Submit payment with `card-online` type. The response includes `included.payments[]` with Stripe PaymentIntent details.
 
         **Key fields in `gatewayData`:**
         - `paymentIntentId` — the Stripe PaymentIntent ID (`pi_...`)
@@ -1743,17 +1743,17 @@ paths:
                       - paymentMethodType: free
                         amountCents: 0
               card:
-                summary: Card payment via Stripe (ACH type)
+                summary: Card payment via Stripe (card-online type)
                 value:
                   data:
                     payments:
-                      - paymentMethodType: ACH
+                      - paymentMethodType: card-online
                         amountCents: 750
       responses:
         '200':
           description: |
             Payment result. For "free" payments, `data` contains the transaction event with `status: "succeeded"`.
-            For "ACH" payments, the response additionally includes `included.payments[]` with Stripe PaymentIntent details needed to confirm the payment via the Stripe API.
+            For "card-online" payments, the response additionally includes `included.payments[]` with Stripe PaymentIntent details needed to confirm the payment via the Stripe API.
           content:
             application/json:
               schema:
@@ -1768,7 +1768,7 @@ paths:
                         type: array
                         items:
                           $ref: '#/components/schemas/PaymentWithGateway'
-                    description: Present only for non-free payment types (e.g. ACH).
+                    description: Present only for non-free payment types (e.g. card-online).
               examples:
                 free:
                   summary: Free ($0) payment settled immediately
@@ -1780,7 +1780,7 @@ paths:
                       orderId: order-uuid
                       settledAt: "2026-02-28T19:01:55.059Z"
                 ach:
-                  summary: ACH payment pending Stripe confirmation
+                  summary: card-online payment pending Stripe confirmation
                   value:
                     data:
                       id: transaction-event-uuid
@@ -1808,7 +1808,7 @@ paths:
                           amount: 750
                           currency: USD
                           status: pending
-                          paymentMethodType: ACH
+                          paymentMethodType: card-online
         '401':
           $ref: '#/components/responses/Unauthorized'
         '400':
@@ -3639,8 +3639,8 @@ components:
                     type: string
                     enum:
                       - free
-                      - ACH
-                      - cardOnline
+                      - card-online
+                      - card-online
                       - organizationCredit
                       - check
                       - cash
@@ -3648,7 +3648,7 @@ components:
                       - giftCard
                       - scholarship
                     description: |
-                      Payment method type. API-callable types: "free" ($0 only), "ACH" (triggers Stripe PaymentIntent for card payment). "cardOnline" is rejected with E_INVALID_BODY. Others may be admin-only or untested.
+                      Payment method type. API-callable types: "free" ($0 only), "card-online" (triggers Stripe PaymentIntent for card payment). "ACH" is no longer valid (returns E_INVALID_BODY). Others may be admin-only or untested.
                   amountCents:
                     type: integer
                     description: Amount in cents. Must be 0 for "free" type.
