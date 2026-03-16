@@ -10,6 +10,16 @@ from recus.state import AuthToken, user_state
 
 _API_URL = "https://api.rec.us"
 _FIREBASE_API_KEY = "AIzaSyCp6DCwnx-6GwkMyI2G1b8ixYs4AXZc-7s"
+_BROWSER_HEADERS = {
+    "Origin": "https://rec.us",
+    "Referer": "https://rec.us/",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
 _FIREBASE_SIGNIN_URL = (
     "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
 )
@@ -66,7 +76,7 @@ class Client:
     def get(self, path: str, params: dict | None = None) -> Any:
         resp = httpx.get(
             f"{_API_URL}{path}", params=params,
-            headers=self._extra_headers(), timeout=30,
+            headers={**_BROWSER_HEADERS, **self._extra_headers()}, timeout=30,
         )
         try:
             resp.raise_for_status()
@@ -100,7 +110,7 @@ class Client:
     def post(self, path: str, json: dict | None = None) -> Any:
         resp = httpx.post(
             f"{_API_URL}{path}", json=json,
-            headers=self._extra_headers(), timeout=30,
+            headers={**_BROWSER_HEADERS, **self._extra_headers()}, timeout=30,
         )
         try:
             resp.raise_for_status()
