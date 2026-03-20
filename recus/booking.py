@@ -154,7 +154,7 @@ def list_bookings(*, account: str) -> None:
             if len(ts_range) == 2:
                 start = datetime.strptime(ts_range[0], "%Y-%m-%d %H:%M:%S")
                 end = datetime.strptime(ts_range[1], "%Y-%m-%d %H:%M:%S")
-                time_str = f"{start.strftime('%Y-%m-%d %H:%M')}-{end.strftime('%H:%M')}"
+                time_str = f"{start.strftime('%a, %Y-%m-%d')}\n{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
 
         location_name = inc.locations[0].name if inc.locations else ""
         site_name = inc.sites[0].courtNumber or "" if inc.sites else ""
